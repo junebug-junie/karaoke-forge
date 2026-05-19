@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -8,6 +9,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from .config import DEFAULT_INSTRUMENTAL_SELECTION, PUBLIC_BASE_PATH
+from .store import list_jobs
 
 router = APIRouter()
 
@@ -243,6 +245,32 @@ def _apply_segment_edits(data: Any, edits: Any) -> dict[str, int]:
     return result
 
 
+def _canonical_lyrics_payload() -> dict[str, Any]:
+    for job in list_jobs(limit=50):
+        if not job.lyrics_path:
+            continue
+        path = Path(job.lyrics_path)
+        if not path.exists():
+            continue
+        lines = [
+            line.strip()
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+            if line.strip()
+        ]
+        return {
+            "canonical_lyrics_lines": lines,
+            "canonical_lyrics_source": str(path),
+            "canonical_lyrics_job_id": job.id,
+            "canonical_lyrics_title": f"{job.artist} — {job.title}",
+        }
+    return {
+        "canonical_lyrics_lines": [],
+        "canonical_lyrics_source": None,
+        "canonical_lyrics_job_id": None,
+        "canonical_lyrics_title": None,
+    }
+
+
 async def _upstream_json(path: str, *, method: str = "GET", json_body: Any | None = None) -> tuple[int, Any]:
     async with httpx.AsyncClient(follow_redirects=False, timeout=30.0) as client:
         response = await client.request(
@@ -258,46 +286,34 @@ async def _upstream_json(path: str, *, method: str = "GET", json_body: Any | Non
     return response.status_code, payload
 
 
-@router.get("/review", response_class=HTMLResponse)
-def review_tab() -> HTMLResponse:
-    iframe_src = html.escape(proxy_url(REVIEW_PATH))
-    status_url = html.escape(public_url("/review/status"))
-    data_url = html.escape(public_url("/review/native/data"))
-    complete_url = html.escape(public_url("/review/native/complete"))
-    direct_url = html.escape(proxy_url(REVIEW_PATH))
-    home_url = html.escape(public_url("/"))
-    review_url = html.escape(public_url("/review"))
-    css_url = html.escape(public_url("/static/style.css"))
-    default_instrumental = html.escape(DEFAULT_INSTRUMENTAL_SELECTION)
-
-    return HTMLResponse(
-        f"""<!doctype html>
+HTML_TEMPLATE = """<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Review · Karaoke Forge</title>
-  <link rel="stylesheet" href="{css_url}" />
+  <link rel="stylesheet" href="__CSS_URL__" />
 </head>
 <body>
   <main class="review-main">
     <header>
-      <a class="brand" href="{home_url}">Karaoke Forge</a>
+      <a class="brand" href="__HOME_URL__">Karaoke Forge</a>
       <nav class="tabs">
-        <a href="{home_url}">Jobs</a>
-        <a href="{review_url}">Review</a>
+        <a href="__HOME_URL__">Jobs</a>
+        <a href="__REVIEW_URL__">Review</a>
       </nav>
     </header>
     <section class="panel review-panel">
       <h1>Native Review</h1>
-      <p class="muted">Edit lyric text, timing, or delete bad segments before finishing.</p>
+      <p class="muted">Treat pasted lyrics as canonical. Use them by line order, then adjust timing/deletions.</p>
       <div class="button-row">
         <span id="review-status" class="status queued">checking review API...</span>
         <button type="button" id="native-refresh">Refresh native data</button>
+        <button type="button" id="apply-pasted">Apply pasted lyrics by line order</button>
         <button type="button" id="native-complete">Finish with selected data</button>
         <button type="button" id="review-reload">Reload iframe debug</button>
       </div>
-      <p class="muted">Default instrumental selection: <code id="default-instrumental">{default_instrumental}</code></p>
+      <p class="muted">Default instrumental selection: <code id="default-instrumental">__DEFAULT_INSTRUMENTAL__</code></p>
       <div id="native-review" class="native-review">Loading review data...</div>
       <details class="debug-details">
         <summary>Raw correction data</summary>
@@ -305,15 +321,15 @@ def review_tab() -> HTMLResponse:
       </details>
       <details class="debug-details">
         <summary>Iframe debug fallback</summary>
-        <p><a class="button-link" href="{direct_url}" target="_blank" rel="noreferrer">Open proxied review directly</a></p>
-        <iframe id="review-frame" class="review-frame" data-src="{iframe_src}" src="{iframe_src}"></iframe>
+        <p><a class="button-link" href="__DIRECT_URL__" target="_blank" rel="noreferrer">Open proxied review directly</a></p>
+        <iframe id="review-frame" class="review-frame" data-src="__IFRAME_SRC__" src="__IFRAME_SRC__"></iframe>
       </details>
     </section>
   </main>
   <script>
-    const statusUrl = "{status_url}";
-    const dataUrl = "{data_url}";
-    const completeUrl = "{complete_url}";
+    const statusUrl = "__STATUS_URL__";
+    const dataUrl = "__DATA_URL__";
+    const completeUrl = "__COMPLETE_URL__";
     const frame = document.getElementById("review-frame");
     const statusEl = document.getElementById("review-status");
     const nativeEl = document.getElementById("native-review");
@@ -321,37 +337,39 @@ def review_tab() -> HTMLResponse:
     const reloadButton = document.getElementById("review-reload");
     const nativeRefreshButton = document.getElementById("native-refresh");
     const nativeCompleteButton = document.getElementById("native-complete");
+    const applyPastedButton = document.getElementById("apply-pasted");
     let lastReady = null;
     let completionRequested = false;
+    let canonicalLyrics = [];
 
-    function escapeHtml(value) {{
-      return String(value ?? "").replace(/[&<>\"']/g, ch => ({{"&":"&amp;","<":"&lt;",">":"&gt;",'\"':"&quot;","'":"&#039;"}}[ch]));
-    }}
-    function setStatus(text, cls) {{
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[ch]));
+    }
+    function setStatus(text, cls) {
       statusEl.textContent = text;
       statusEl.className = "status " + cls;
-    }}
-    function segmentText(seg) {{
+    }
+    function segmentText(seg) {
       return seg.text || seg.corrected_text || seg.lyrics || seg.line || "";
-    }}
-    function secondsValue(value) {{
+    }
+    function secondsValue(value) {
       const n = Number(value);
       return Number.isFinite(n) ? n : null;
-    }}
-    function formatTimestamp(value) {{
+    }
+    function formatTimestamp(value) {
       const total = secondsValue(value);
       if (total === null) return value ?? "";
       const minutes = Math.floor(total / 60);
       const seconds = total - minutes * 60;
-      return `${{minutes}}:${{seconds.toFixed(3).padStart(6, "0")}}`;
-    }}
-    function collectSegmentEdits() {{
-      return Array.from(document.querySelectorAll("tr[data-segment-index]")).map(row => {{
+      return `${minutes}:${seconds.toFixed(3).padStart(6, "0")}`;
+    }
+    function collectSegmentEdits() {
+      return Array.from(document.querySelectorAll("tr[data-segment-index]")).map(row => {
         const textEl = row.querySelector("textarea[data-field='text']");
         const startEl = row.querySelector("input[data-field='start']");
         const endEl = row.querySelector("input[data-field='end']");
         const deleteEl = row.querySelector("input[data-field='delete']");
-        return {{
+        return {
           index: Number(row.dataset.segmentIndex),
           delete: Boolean(deleteEl && deleteEl.checked),
           original_text: textEl?.dataset.originalValue || "",
@@ -360,116 +378,162 @@ def review_tab() -> HTMLResponse:
           start: startEl?.value.trim() || "",
           original_end: endEl?.dataset.originalValue || "",
           end: endEl?.value.trim() || "",
-        }};
-      }}).filter(edit => edit.delete || edit.text !== edit.original_text || edit.start !== edit.original_start || edit.end !== edit.original_end);
-    }}
-    function reloadFrame(reason) {{
+        };
+      }).filter(edit => edit.delete || edit.text !== edit.original_text || edit.start !== edit.original_start || edit.end !== edit.original_end);
+    }
+    function setRowTextFromPasted(row) {
+      const idx = Number(row.dataset.segmentIndex);
+      const pasted = canonicalLyrics[idx];
+      if (!pasted) return false;
+      const textEl = row.querySelector("textarea[data-field='text']");
+      if (!textEl) return false;
+      textEl.value = pasted;
+      row.classList.add("lyrics-applied");
+      return true;
+    }
+    function applyPastedLyricsByLineOrder() {
+      let applied = 0;
+      document.querySelectorAll("tr[data-segment-index]").forEach(row => {
+        if (setRowTextFromPasted(row)) applied += 1;
+      });
+      setStatus(`applied ${applied} pasted lyric line(s) by row order`, "done");
+    }
+    function reloadFrame(reason) {
       const base = frame.dataset.src;
       const sep = base.includes("?") ? "&" : "?";
       frame.src = base + sep + "kf_reload=" + Date.now();
       setStatus("review API ready — iframe reloaded (" + reason + ")", "running");
-    }}
-    function renderNative(payload) {{
+    }
+    function renderNative(payload) {
       nativeJsonEl.textContent = JSON.stringify(payload, null, 2);
       const segments = payload.segments || [];
+      canonicalLyrics = payload.canonical_lyrics_lines || [];
+      const source = payload.canonical_lyrics_source || "none";
       const instrumentals = payload.instrumental_options || [];
-      const meta = payload.metadata || {{}};
-      const title = [meta.artist, meta.title].filter(Boolean).join(" — ") || "Current review session";
+      const meta = payload.metadata || {};
+      const title = [meta.artist, meta.title].filter(Boolean).join(" — ") || payload.canonical_lyrics_title || "Current review session";
       const rows = segments.length
-        ? segments.map((seg, idx) => {{
+        ? segments.map((seg, idx) => {
             const text = segmentText(seg);
+            const pasted = canonicalLyrics[idx] || "";
+            const mismatch = pasted && pasted.trim() !== text.trim();
             const start = formatTimestamp(seg.start ?? seg.start_time ?? "");
             const end = formatTimestamp(seg.end ?? seg.end_time ?? "");
-            return `<tr data-segment-index="${{idx}}"><td>${{idx + 1}}</td><td><input class="time-edit" data-field="start" data-original-value="${{escapeHtml(start)}}" value="${{escapeHtml(start)}}" /></td><td><input class="time-edit" data-field="end" data-original-value="${{escapeHtml(end)}}" value="${{escapeHtml(end)}}" /></td><td><textarea class="segment-edit" data-field="text" data-original-value="${{escapeHtml(text)}}" rows="2">${{escapeHtml(text)}}</textarea></td><td><label><input type="checkbox" data-field="delete" /> delete</label></td></tr>`;
-          }}).join("")
-        : `<tr><td colspan="5">No segment list found in correction payload. Use the raw JSON drawer.</td></tr>`;
+            return `<tr data-segment-index="${idx}" class="${mismatch ? "lyric-mismatch" : ""}"><td>${idx + 1}</td><td><input class="time-edit" data-field="start" data-original-value="${escapeHtml(start)}" value="${escapeHtml(start)}" /></td><td><input class="time-edit" data-field="end" data-original-value="${escapeHtml(end)}" value="${escapeHtml(end)}" /></td><td><textarea class="segment-edit" data-field="text" data-original-value="${escapeHtml(text)}" rows="2">${escapeHtml(text)}</textarea></td><td>${pasted ? `<div class="pasted-line">${escapeHtml(pasted)}</div><button type="button" data-use-pasted="${idx}">Use pasted</button>` : `<span class="muted">no pasted line</span>`}</td><td><label><input type="checkbox" data-field="delete" /> delete</label></td></tr>`;
+          }).join("")
+        : `<tr><td colspan="6">No segment list found in correction payload. Use the raw JSON drawer.</td></tr>`;
       const defaultSelection = document.getElementById("default-instrumental").textContent || "clean";
       const inst = instrumentals.length
-        ? `<fieldset><legend>Instrumental selection</legend>${{instrumentals.map((opt, idx) => {{
+        ? `<fieldset><legend>Instrumental selection</legend>${instrumentals.map((opt, idx) => {
             const id = opt.id || opt.value || (idx === 0 ? "clean" : "with_backing");
             const checked = id === defaultSelection || (!instrumentals.some(o => (o.id || o.value) === defaultSelection) && idx === 0);
-            return `<label class="radio-row"><input type="radio" name="instrumental_selection" value="${{escapeHtml(id)}}" ${{checked ? "checked" : ""}} /> <strong>${{escapeHtml(opt.label || id)}}</strong> <code>${{escapeHtml(opt.audio_path || opt.audio_url || "")}}</code></label>`;
-          }}).join("")}}</fieldset>`
-        : `<p class="muted">No instrumental options found in payload; defaulting to <code>${{escapeHtml(defaultSelection)}}</code>.</p>`;
+            return `<label class="radio-row"><input type="radio" name="instrumental_selection" value="${escapeHtml(id)}" ${checked ? "checked" : ""} /> <strong>${escapeHtml(opt.label || id)}</strong> <code>${escapeHtml(opt.audio_path || opt.audio_url || "")}</code></label>`;
+          }).join("")}</fieldset>`
+        : `<p class="muted">No instrumental options found in payload; defaulting to <code>${escapeHtml(defaultSelection)}</code>.</p>`;
       nativeEl.innerHTML = `
-        <h2>${{escapeHtml(title)}}</h2>
+        <h2>${escapeHtml(title)}</h2>
         <h3>Instrumental options</h3>
-        ${{inst}}
+        ${inst}
         <h3>Lyric segments</h3>
-        <p class="muted">Time fields accept seconds, m:ss, or m:ss.mmm.</p>
-        <table class="review-table"><thead><tr><th>#</th><th>Start</th><th>End</th><th>Editable text</th><th>Delete</th></tr></thead><tbody>${{rows}}</tbody></table>
+        <p class="muted">Pasted lyric source: <code>${escapeHtml(source)}</code>. Time fields accept seconds, m:ss, or m:ss.mm.</p>
+        <table class="review-table"><thead><tr><th>#</th><th>Start</th><th>End</th><th>Final editable text</th><th>Pasted lyric line</th><th>Delete</th></tr></thead><tbody>${rows}</tbody></table>
       `;
-    }}
-    async function loadNativeData() {{
-      try {{
-        const response = await fetch(dataUrl, {{cache: "no-store"}});
+    }
+    async function loadNativeData() {
+      try {
+        const response = await fetch(dataUrl, {cache: "no-store"});
         const payload = await response.json();
-        if (!response.ok || payload.ready === false) {{
-          if (!completionRequested) nativeEl.innerHTML = `<p class="error">${{escapeHtml(payload.error || "Review data not ready")}}</p>`;
+        if (!response.ok || payload.ready === false) {
+          if (!completionRequested) nativeEl.innerHTML = `<p class="error">${escapeHtml(payload.error || "Review data not ready")}</p>`;
           nativeJsonEl.textContent = JSON.stringify(payload, null, 2);
           return;
-        }}
+        }
         renderNative(payload);
-      }} catch (err) {{
-        if (!completionRequested) nativeEl.innerHTML = `<p class="error">Failed to load native review data: ${{escapeHtml(err)}}</p>`;
-      }}
-    }}
-    async function completeNativeReview() {{
+      } catch (err) {
+        if (!completionRequested) nativeEl.innerHTML = `<p class="error">Failed to load native review data: ${escapeHtml(err)}</p>`;
+      }
+    }
+    async function completeNativeReview() {
       nativeCompleteButton.disabled = true;
       nativeCompleteButton.textContent = "Finishing...";
-      try {{
+      try {
         const selected = document.querySelector('input[name="instrumental_selection"]:checked');
         const selection = selected ? selected.value : (document.getElementById("default-instrumental").textContent || "clean");
         const segmentEdits = collectSegmentEdits();
         const url = completeUrl + "?instrumental_selection=" + encodeURIComponent(selection);
-        const response = await fetch(url, {{
+        const response = await fetch(url, {
           method: "POST",
           cache: "no-store",
-          headers: {{"content-type": "application/json"}},
-          body: JSON.stringify({{segment_edits: segmentEdits}}),
-        }});
+          headers: {"content-type": "application/json"},
+          body: JSON.stringify({segment_edits: segmentEdits}),
+        });
         const payload = await response.json();
         nativeJsonEl.textContent = JSON.stringify(payload, null, 2);
         if (!response.ok || payload.ok === false) throw new Error(JSON.stringify(payload.error || payload));
         completionRequested = true;
-        const counts = payload.applied_segment_edits || {{}};
+        const counts = payload.applied_segment_edits || {};
         setStatus("review submitted — waiting for karaoke-gen to finalise", "done");
-        nativeEl.insertAdjacentHTML("afterbegin", `<p class="status done">Review accepted with instrumental <code>${{escapeHtml(selection)}}</code>; text edits: ${{counts.text || 0}}, timing edits: ${{counts.timing || 0}}, deleted: ${{counts.deleted || 0}}. Watch the job log for final render.</p>`);
-      }} catch (err) {{
-        nativeEl.insertAdjacentHTML("afterbegin", `<p class="error">Finish failed: ${{escapeHtml(err)}}</p>`);
-      }} finally {{
+        nativeEl.insertAbjacentHTML("afterbegin", `<p class="status done">Review accepted with instrumental <code>${escapeHtml(selection)}</code>; text edits: ${counts.text || 0}, timing edits: ${counts.timing || 0}, deleted: ${counts.deleted || 0}. Watch the job log for final render.</p>`);
+      } catch (err) {
+        nativeEl.insertAdjacentHTML("afterbegin", `<p class="error">Finish failed: ${escapeHtml(err)}</p>`);
+      } finally {
         nativeCompleteButton.disabled = false;
         nativeCompleteButton.textContent = "Finish with selected data";
-      }}
-    }}
-    async function checkReviewServer() {{
-      try {{
-        const response = await fetch(statusUrl, {{cache: "no-store"}});
+      }
+    }
+    async function checkReviewServer() {
+      try {
+        const response = await fetch(statusUrl, {cache: "no-store"});
         const data = await response.json();
-        if (data.ready) {{
+        if (data.ready) {
           if (completionRequested) setStatus("review submitted — waiting for review API to close", "done");
-          else if (lastReady !== true) {{ reloadFrame("API became ready"); loadNativeData(); }}
+          else if (lastReady !== true) { reloadFrame("API became ready"); loadNativeData(); }
           else setStatus("review API ready", "running");
           lastReady = true;
-        }} else {{
+        } else {
           setStatus(completionRequested ? "review API closed — karaoke-gen should be finalising" : "waiting for karaoke-gen review API...", completionRequested ? "done" : "queued");
           lastReady = false;
-        }}
-      }} catch (err) {{
+        }
+      } catch (err) {
         setStatus(completionRequested ? "review API closed — karaoke-gen should be finalising" : "review status check failed: " + err, completionRequested ? "done" : "failed");
         lastReady = false;
-      }}
-    }}
+      }
+    }
+    nativeEl.addEventListener("click", event => {
+      const button = event.target.closest("button[data-use-pasted]");
+      if (!button) return;
+      const row = button.closest("tr[data-segment-index]");
+      if (row && setRowTextFromPasted(row)) setStatus("pasted lyric copied into row " + (Number(row.dataset.segmentIndex) + 1), "done");
+    });
     reloadButton.addEventListener("click", () => reloadFrame("manual"));
     nativeRefreshButton.addEventListener("click", loadNativeData);
     nativeCompleteButton.addEventListener("click", completeNativeReview);
+    applyPastedButton.addEventListener("click", applyPastedLyricsByLineOrder);
     checkReviewServer();
     loadNativeData();
     setInterval(checkReviewServer, 2000);
   </script>
 </body>
 </html>"""
-    )
+
+
+@router.get("/review", response_class=HTMLResponse)
+def review_tab() -> HTMLResponse:
+    values = {
+        "__IFRAME_SRC__": html.escape(proxy_url(REVIEW_PATH)),
+        "__STATUS_URL__": html.escape(public_url("/review/status")),
+        "__DATA_URL__": html.escape(public_url("/review/native/data")),
+        "__COMPLETE_URL__": html.escape(public_url("/review/native/complete")),
+        "__DIRECT_URL__": html.escape(proxy_url(REVIEW_PATH)),
+        "__HOME_URL__": html.escape(public_url("/")),
+        "__REVIEW_URL__": html.escape(public_url("/review")),
+        "__CSS_URL__": html.escape(public_url("/static/style.css")),
+        "__DEFAULT_INSTRUMENTAL__": html.escape(DEFAULT_INSTRUMENTAL_SELECTION),
+    }
+    html_text = HTML_TEMPLATE
+    for placeholder, value in values.items():
+        html_text = html_text.replace(placeholder, value)
+    return HTMLResponse(html_text)
 
 
 @router.get("/review/status")
@@ -492,6 +556,7 @@ async def native_review_data() -> JSONResponse:
     if isinstance(payload, dict):
         payload = dict(payload)
         payload.setdefault("segments", _extract_segments(payload))
+        payload.update(_canonical_lyrics_payload())
     return JSONResponse(payload)
 
 
@@ -519,7 +584,7 @@ async def native_complete_review(request: Request, instrumental_selection: str |
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
 
 
-@router.api_route("/review-proxy/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+@router.api_route("/review-proxy/{path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
 async def review_proxy(path: str, request: Request) -> Response:
     upstream_url = f"{REVIEW_UPSTREAM}/{path}"
     if request.url.query:
