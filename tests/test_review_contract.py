@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -95,6 +96,20 @@ def test_apply_edits_mutates_corrected_segments_and_mirrors_segments():
     assert payload["segments"] is not corrected
     payload["segments"] = corrected
     assert payload["segments"][0]["text"] == "canonical A"
+
+
+def test_review_page_inline_script_is_valid_javascript(client):
+    response = client.get("/karaoke-forge/review")
+    assert response.status_code == 200
+    assert response.headers.get("cache-control") == "no-store, max-age=0"
+    html = response.text
+    script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+    split_match = re.search(r"canonicalLyricsEl\.value\.split\(([^)]+)\)", script)
+    assert split_match is not None
+    assert "\n" not in split_match.group(0)
+    assert split_match.group(1) == "/\\r?\\n/"
+    assert "time-part" in html
+    assert "review-table" in html
 
 
 def test_native_data_requires_corrected_segments(client):

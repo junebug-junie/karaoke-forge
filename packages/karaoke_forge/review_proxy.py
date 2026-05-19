@@ -7,7 +7,7 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
-from .config import DEFAULT_INSTRUMENTAL_SELECTION, PUBLIC_BASE_PATH
+from .config import DEFAULT_INSTRUMENTAL_SELECTION, PUBLIC_BASE_PATH, ROOT_DIR
 from .job_lifecycle import get_active_job_id
 from .review_contract import review_payload_summary, segments_preview_texts, segments_text_digest
 from .review_gate import mark_review_complete
@@ -50,6 +50,15 @@ def public_url(path: str = "/") -> str:
     if not path.startswith("/"):
         path = "/" + path
     return f"{PUBLIC_BASE_PATH}{path}" if PUBLIC_BASE_PATH else path
+
+
+def static_css_url() -> str:
+    css_path = ROOT_DIR / "apps" / "web" / "static" / "style.css"
+    try:
+        version = int(css_path.stat().st_mtime)
+    except OSError:
+        version = 0
+    return public_url(f"/static/style.css?v={version}")
 
 
 def proxy_url(path: str = "/") -> str:
@@ -460,7 +469,7 @@ HTML_TEMPLATE = """<!doctype html>
       statusEl.className = "status " + cls;
     }
     function parseCanonicalLines() {
-      return canonicalLyricsEl.value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+      return canonicalLyricsEl.value.split(/\\r?\\n/).map(line => line.trim()).filter(Boolean);
     }
     function persistCanonicalLyrics() {
       try { localStorage.setItem(canonicalStorageKey, canonicalLyricsEl.value); } catch (err) {}
@@ -754,13 +763,16 @@ def review_tab() -> HTMLResponse:
         "__DIRECT_URL__": html.escape(proxy_url(REVIEW_PATH)),
         "__HOME_URL__": html.escape(public_url("/")),
         "__REVIEW_URL__": html.escape(public_url("/review")),
-        "__CSS_URL__": html.escape(public_url("/static/style.css")),
+        "__CSS_URL__": html.escape(static_css_url()),
         "__DEFAULT_INSTRUMENTAL__": html.escape(DEFAULT_INSTRUMENTAL_SELECTION),
     }
     html_text = HTML_TEMPLATE
     for placeholder, value in values.items():
         html_text = html_text.replace(placeholder, value)
-    return HTMLResponse(html_text)
+    return HTMLResponse(
+        html_text,
+        headers={"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"},
+    )
 
 
 @router.get("/review/status")
