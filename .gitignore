@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+
+library/songs/
+library/jobs/
+library/renders/
+
+.env
+.env.*
+.DS_Store
