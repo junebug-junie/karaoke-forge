@@ -25,3 +25,12 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["packages*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = [
+  ".git",
+  ".venv",
+  "library",
+  "vendor"
+]
