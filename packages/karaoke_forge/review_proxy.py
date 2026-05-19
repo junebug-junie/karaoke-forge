@@ -15,6 +15,8 @@ REVIEW_UPSTREAM = "http://127.0.0.1:8000"
 REVIEW_PATH = "/app/jobs/local/review"
 REVIEW_API_READY_PATH = "/api/correction-data"
 SEGMENT_TEXT_KEYS = ("text", "corrected_text", "lyrics", "line")
+SEGMENT_START_KEYS = ("start", "start_time")
+SEGMENT_END_KEYS = ("end", "end_time")
 HOP_BY_HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -84,22 +86,35 @@ def rewrite_body(content: bytes, content_type: str) -> bytes:
     return text.encode("utf-8")
 
 
-def _extract_segments(data: Any) -> list[dict[str, Any]]:
+def _looks_like_segment_list(value: Any) -> bool:
+    return isinstance(value, list) and any(isinstance(item, dict) for item in value)
+
+
+def _find_segments_list(data: Any) -> list[Any] | None:
     if isinstance(data, dict):
         for key in ("segments", "lyrics_segments", "corrected_segments"):
             value = data.get(key)
-            if isinstance(value, list):
-                return [item for item in value if isinstance(item, dict)]
+            if _looks_like_segment_list(value):
+                return value
         for value in data.values():
-            found = _extract_segments(value)
-            if found:
+            found = _find_segments_list(value)
+            if found is not None:
                 return found
     elif isinstance(data, list):
+        if _looks_like_segment_list(data):
+            return data
         for value in data:
-            found = _extract_segments(value)
-            if found:
+            found = _find_segments_list(value)
+            if found is not None:
                 return found
-    return []
+    return None
+
+
+def _extract_segments(data: Any) -> list[dict[str, Any]]:
+    segments = _find_segments_list(data)
+    if segments is None:
+        return []
+    return [item for item in segments if isinstance(item, dict)]
 
 
 def _segment_text(segment: dict[str, Any]) -> str:
@@ -119,6 +134,44 @@ def _segment_text(segment: dict[str, Any]) -> str:
     return ""
 
 
+def _segment_time(segment: dict[str, Any], keys: tuple[str, ...]) -> float | None:
+    for key in keys:
+        value = segment.get(key)
+        if value is None or value == "":
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _parse_timestamp_seconds(value: Any) -> float | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if ":" not in text:
+        try:
+            return round(float(text), 3)
+        except ValueError:
+            return None
+
+    parts = text.split(":")
+    try:
+        numbers = [float(part) for part in parts]
+    except ValueError:
+        return None
+    if len(numbers) == 2:
+        minutes, seconds = numbers
+        return round(minutes * 60 + seconds, 3)
+    if len(numbers) == 3:
+        hours, minutes, seconds = numbers
+        return round(hours * 3600 + minutes * 60 + seconds, 3)
+    return None
+
+
 def _set_segment_text(segment: dict[str, Any], text: str) -> None:
     updated = False
     for key in SEGMENT_TEXT_KEYS:
@@ -129,11 +182,27 @@ def _set_segment_text(segment: dict[str, Any], text: str) -> None:
         segment["text"] = text
 
 
-def _apply_segment_edits(data: Any, edits: Any) -> int:
+def _set_segment_time(segment: dict[str, Any], keys: tuple[str, ...], value: float) -> None:
+    updated = False
+    for key in keys:
+        if key in segment:
+            segment[key] = value
+            updated = True
+    if not updated:
+        segment[keys[0]] = value
+
+
+def _apply_segment_edits(data: Any, edits: Any) -> dict[str, int]:
+    result = {"text": 0, "timing": 0, "deleted": 0}
     if not isinstance(edits, list):
-        return 0
-    segments = _extract_segments(data)
-    applied = 0
+        return result
+
+    segment_list = _find_segments_list(data)
+    if segment_list is None:
+        return result
+    segments = [item for item in segment_list if isinstance(item, dict)]
+
+    delete_indexes: list[int] = []
     for edit in edits:
         if not isinstance(edit, dict):
             continue
@@ -143,11 +212,35 @@ def _apply_segment_edits(data: Any, edits: Any) -> int:
             continue
         if idx < 0 or idx >= len(segments):
             continue
+        if bool(edit.get("delete")):
+            delete_indexes.append(idx)
+            continue
+
+        segment = segments[idx]
         text = str(edit.get("text") or "").strip()
-        if text and text != _segment_text(segments[idx]):
-            _set_segment_text(segments[idx], text)
-            applied += 1
-    return applied
+        if text and text != _segment_text(segment):
+            _set_segment_text(segment, text)
+            result["text"] += 1
+
+        start = _parse_timestamp_seconds(edit.get("start"))
+        if start is not None and start != _segment_time(segment, SEGMENT_START_KEYS):
+            _set_segment_time(segment, SEGMENT_START_KEYS, start)
+            result["timing"] += 1
+
+        end = _parse_timestamp_seconds(edit.get("end"))
+        if end is not None and end != _segment_time(segment, SEGMENT_END_KEYS):
+            _set_segment_time(segment, SEGMENT_END_KEYS, end)
+            result["timing"] += 1
+
+    for idx in sorted(set(delete_indexes), reverse=True):
+        target = segments[idx]
+        try:
+            segment_list.remove(target)
+            result["deleted"] += 1
+        except ValueError:
+            pass
+
+    return result
 
 
 async def _upstream_json(path: str, *, method: str = "GET", json_body: Any | None = None) -> tuple[int, Any]:
@@ -197,7 +290,7 @@ def review_tab() -> HTMLResponse:
     </header>
     <section class="panel review-panel">
       <h1>Native Review</h1>
-      <p class="muted">Edit lyric segment text here, then finish. Edits are merged into karaoke-gen's correction payload.</p>
+      <p class="muted">Edit lyric text, timing, or delete bad segments before finishing.</p>
       <div class="button-row">
         <span id="review-status" class="status queued">checking review API...</span>
         <button type="button" id="native-refresh">Refresh native data</button>
@@ -241,10 +334,34 @@ def review_tab() -> HTMLResponse:
     function segmentText(seg) {{
       return seg.text || seg.corrected_text || seg.lyrics || seg.line || "";
     }}
+    function secondsValue(value) {{
+      const n = Number(value);
+      return Number.isFinite(n) ? n : null;
+    }}
+    function formatTimestamp(value) {{
+      const total = secondsValue(value);
+      if (total === null) return value ?? "";
+      const minutes = Math.floor(total / 60);
+      const seconds = total - minutes * 60;
+      return `${{minutes}}:${{seconds.toFixed(3).padStart(6, "0")}}`;
+    }}
     function collectSegmentEdits() {{
-      return Array.from(document.querySelectorAll("textarea[data-segment-index]")).map(el => {{
-        return {{index: Number(el.dataset.segmentIndex), original_text: el.dataset.originalText || "", text: el.value.trim()}};
-      }}).filter(edit => edit.text && edit.text !== edit.original_text);
+      return Array.from(document.querySelectorAll("tr[data-segment-index]")).map(row => {{
+        const textEl = row.querySelector("textarea[data-field='text']");
+        const startEl = row.querySelector("input[data-field='start']");
+        const endEl = row.querySelector("input[data-field='end']");
+        const deleteEl = row.querySelector("input[data-field='delete']");
+        return {{
+          index: Number(row.dataset.segmentIndex),
+          delete: Boolean(deleteEl && deleteEl.checked),
+          original_text: textEl?.dataset.originalValue || "",
+          text: textEl?.value.trim() || "",
+          original_start: startEl?.dataset.originalValue || "",
+          start: startEl?.value.trim() || "",
+          original_end: endEl?.dataset.originalValue || "",
+          end: endEl?.value.trim() || "",
+        }};
+      }}).filter(edit => edit.delete || edit.text !== edit.original_text || edit.start !== edit.original_start || edit.end !== edit.original_end);
     }}
     function reloadFrame(reason) {{
       const base = frame.dataset.src;
@@ -261,9 +378,11 @@ def review_tab() -> HTMLResponse:
       const rows = segments.length
         ? segments.map((seg, idx) => {{
             const text = segmentText(seg);
-            return `<tr><td>${{idx + 1}}</td><td>${{escapeHtml(seg.start ?? seg.start_time ?? "")}}</td><td>${{escapeHtml(seg.end ?? seg.end_time ?? "")}}</td><td><textarea class="segment-edit" data-segment-index="${{idx}}" data-original-text="${{escapeHtml(text)}}" rows="2">${{escapeHtml(text)}}</textarea></td></tr>`;
+            const start = formatTimestamp(seg.start ?? seg.start_time ?? "");
+            const end = formatTimestamp(seg.end ?? seg.end_time ?? "");
+            return `<tr data-segment-index="${{idx}}"><td>${{idx + 1}}</td><td><input class="time-edit" data-field="start" data-original-value="${{escapeHtml(start)}}" value="${{escapeHtml(start)}}" /></td><td><input class="time-edit" data-field="end" data-original-value="${{escapeHtml(end)}}" value="${{escapeHtml(end)}}" /></td><td><textarea class="segment-edit" data-field="text" data-original-value="${{escapeHtml(text)}}" rows="2">${{escapeHtml(text)}}</textarea></td><td><label><input type="checkbox" data-field="delete" /> delete</label></td></tr>`;
           }}).join("")
-        : `<tr><td colspan="4">No segment list found in correction payload. Use the raw JSON drawer.</td></tr>`;
+        : `<tr><td colspan="5">No segment list found in correction payload. Use the raw JSON drawer.</td></tr>`;
       const defaultSelection = document.getElementById("default-instrumental").textContent || "clean";
       const inst = instrumentals.length
         ? `<fieldset><legend>Instrumental selection</legend>${{instrumentals.map((opt, idx) => {{
@@ -277,8 +396,8 @@ def review_tab() -> HTMLResponse:
         <h3>Instrumental options</h3>
         ${{inst}}
         <h3>Lyric segments</h3>
-        <p class="muted">Fix transcription errors directly in the text boxes before clicking Finish.</p>
-        <table class="review-table"><thead><tr><th>#</th><th>Start</th><th>End</th><th>Editable text</th></tr></thead><tbody>${{rows}}</tbody></table>
+        <p class="muted">Time fields accept seconds, m:ss, or m:ss.mmm.</p>
+        <table class="review-table"><thead><tr><th>#</th><th>Start</th><th>End</th><th>Editable text</th><th>Delete</th></tr></thead><tbody>${{rows}}</tbody></table>
       `;
     }}
     async function loadNativeData() {{
@@ -313,8 +432,9 @@ def review_tab() -> HTMLResponse:
         nativeJsonEl.textContent = JSON.stringify(payload, null, 2);
         if (!response.ok || payload.ok === false) throw new Error(JSON.stringify(payload.error || payload));
         completionRequested = true;
+        const counts = payload.applied_segment_edits || {{}};
         setStatus("review submitted — waiting for karaoke-gen to finalise", "done");
-        nativeEl.insertAdjacentHTML("afterbegin", `<p class="status done">Review accepted with instrumental <code>${{escapeHtml(selection)}}</code> and ${{segmentEdits.length}} lyric edit(s). Watch the job log for final render.</p>`);
+        nativeEl.insertAdjacentHTML("afterbegin", `<p class="status done">Review accepted with instrumental <code>${{escapeHtml(selection)}}</code>; text edits: ${{counts.text || 0}}, timing edits: ${{counts.timing || 0}}, deleted: ${{counts.deleted || 0}}. Watch the job log for final render.</p>`);
       }} catch (err) {{
         nativeEl.insertAdjacentHTML("afterbegin", `<p class="error">Finish failed: ${{escapeHtml(err)}}</p>`);
       }} finally {{
