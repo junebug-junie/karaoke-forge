@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, Request
@@ -80,9 +81,6 @@ def rewrite_body(content: bytes, content_type: str) -> bytes:
     for old, new in replacements.items():
         text = text.replace(old, new)
 
-    # Next.js client bundles often call fetch('/api/...') or refer to absolute
-    # '/_next/...' paths from JavaScript. Those do not appear as href/src attrs,
-    # so rewrite common quoted absolute route prefixes too.
     for absolute_prefix in ABSOLUTE_REVIEW_PREFIXES + LOCALE_PREFIXES:
         proxied_prefix = prefix + absolute_prefix
         for quote in ('"', "'", "`"):
@@ -91,10 +89,62 @@ def rewrite_body(content: bytes, content_type: str) -> bytes:
     return text.encode("utf-8")
 
 
+def _extract_segments(data: Any) -> list[dict[str, Any]]:
+    if isinstance(data, dict):
+        for key in ("segments", "lyrics_segments", "corrected_segments"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+        for value in data.values():
+            found = _extract_segments(value)
+            if found:
+                return found
+    elif isinstance(data, list):
+        for value in data:
+            found = _extract_segments(value)
+            if found:
+                return found
+    return []
+
+
+def _segment_text(segment: dict[str, Any]) -> str:
+    for key in ("text", "corrected_text", "lyrics", "line"):
+        value = segment.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    words = segment.get("words")
+    if isinstance(words, list):
+        text = " ".join(
+            str(word.get("text") or word.get("word") or "").strip()
+            for word in words
+            if isinstance(word, dict)
+        ).strip()
+        if text:
+            return text
+    return ""
+
+
+async def _upstream_json(path: str, *, method: str = "GET", json_body: Any | None = None) -> tuple[int, Any]:
+    async with httpx.AsyncClient(follow_redirects=False, timeout=30.0) as client:
+        response = await client.request(
+            method,
+            REVIEW_UPSTREAM + path,
+            headers={"accept-encoding": "identity"},
+            json=json_body,
+        )
+    try:
+        payload: Any = response.json()
+    except ValueError:
+        payload = {"text": response.text[:4000]}
+    return response.status_code, payload
+
+
 @router.get("/review", response_class=HTMLResponse)
 def review_tab() -> HTMLResponse:
     iframe_src = html.escape(proxy_url(REVIEW_PATH))
     status_url = html.escape(public_url("/review/status"))
+    data_url = html.escape(public_url("/review/native/data"))
+    complete_url = html.escape(public_url("/review/native/complete"))
     direct_url = html.escape(proxy_url(REVIEW_PATH))
     home_url = html.escape(public_url("/"))
     review_url = html.escape(public_url("/review"))
@@ -120,23 +170,42 @@ def review_tab() -> HTMLResponse:
     </header>
 
     <section class="panel review-panel">
-      <h1>Review</h1>
-      <p class="muted">Embedded karaoke-gen review session from Atlas localhost.</p>
+      <h1>Native Review</h1>
+      <p class="muted">This bypasses the brittle Next.js iframe and talks to karaoke-gen's local review API directly.</p>
       <div class="button-row">
         <span id="review-status" class="status queued">checking review server...</span>
-        <button type="button" id="review-reload">Reload review frame</button>
-        <a class="button-link" href="{direct_url}" target="_blank" rel="noreferrer">Open proxied review directly</a>
+        <button type="button" id="native-refresh">Refresh native data</button>
+        <button type="button" id="native-complete">Finish with current/default data</button>
+        <button type="button" id="review-reload">Reload iframe debug</button>
       </div>
-      <iframe id="review-frame" class="review-frame" data-src="{iframe_src}" src="{iframe_src}"></iframe>
+      <div id="native-review" class="native-review">Loading review data...</div>
+      <details class="debug-details">
+        <summary>Raw correction data</summary>
+        <pre id="native-json" class="live-log">No data yet.</pre>
+      </details>
+      <details class="debug-details">
+        <summary>Iframe debug fallback</summary>
+        <p><a class="button-link" href="{direct_url}" target="_blank" rel="noreferrer">Open proxied review directly</a></p>
+        <iframe id="review-frame" class="review-frame" data-src="{iframe_src}" src="{iframe_src}"></iframe>
+      </details>
     </section>
   </main>
   <script>
     const statusUrl = "{status_url}";
+    const dataUrl = "{data_url}";
+    const completeUrl = "{complete_url}";
     const frame = document.getElementById("review-frame");
     const statusEl = document.getElementById("review-status");
+    const nativeEl = document.getElementById("native-review");
+    const nativeJsonEl = document.getElementById("native-json");
     const reloadButton = document.getElementById("review-reload");
+    const nativeRefreshButton = document.getElementById("native-refresh");
+    const nativeCompleteButton = document.getElementById("native-complete");
     let lastReady = null;
-    let reloadCount = 0;
+
+    function escapeHtml(value) {{
+      return String(value ?? "").replace(/[&<>\"']/g, ch => ({{"&":"&amp;","<":"&lt;",">":"&gt;","\\\"":"&quot;","'":"&#039;"}}[ch]));
+    }}
 
     function setStatus(text, cls) {{
       statusEl.textContent = text;
@@ -147,8 +216,60 @@ def review_tab() -> HTMLResponse:
       const base = frame.dataset.src;
       const sep = base.includes("?") ? "&" : "?";
       frame.src = base + sep + "kf_reload=" + Date.now();
-      reloadCount += 1;
-      setStatus("review server ready — frame reloaded (" + reason + ")", "running");
+      setStatus("review server ready — iframe reloaded (" + reason + ")", "running");
+    }}
+
+    function renderNative(payload) {{
+      nativeJsonEl.textContent = JSON.stringify(payload, null, 2);
+      const segments = payload.segments || [];
+      const instrumentals = payload.instrumental_options || [];
+      const meta = payload.metadata || {{}};
+      const title = [meta.artist, meta.title].filter(Boolean).join(" — ") || "Current review session";
+      const rows = segments.length
+        ? segments.map((seg, idx) => `<tr><td>${{idx + 1}}</td><td>${{escapeHtml(seg.start ?? seg.start_time ?? "")}}</td><td>${{escapeHtml(seg.end ?? seg.end_time ?? "")}}</td><td>${{escapeHtml(seg.text || seg.corrected_text || seg.lyrics || seg.line || "")}}</td></tr>`).join("")
+        : `<tr><td colspan="4">No segment list found in correction payload. Use the raw JSON drawer.</td></tr>`;
+      const inst = instrumentals.length
+        ? `<ul>${{instrumentals.map(opt => `<li><strong>${{escapeHtml(opt.label || opt.id || "option")}}</strong> <code>${{escapeHtml(opt.audio_path || opt.audio_url || "")}}</code></li>`).join("")}}</ul>`
+        : `<p class="muted">No instrumental options found in payload.</p>`;
+      nativeEl.innerHTML = `
+        <h2>${{escapeHtml(title)}}</h2>
+        <h3>Instrumental options</h3>
+        ${{inst}}
+        <h3>Lyric segments</h3>
+        <table class="review-table"><thead><tr><th>#</th><th>Start</th><th>End</th><th>Text</th></tr></thead><tbody>${{rows}}</tbody></table>
+      `;
+    }}
+
+    async function loadNativeData() {{
+      try {{
+        const response = await fetch(dataUrl, {{cache: "no-store"}});
+        const payload = await response.json();
+        if (!response.ok || payload.ready === false) {{
+          nativeEl.innerHTML = `<p class="error">${{escapeHtml(payload.error || "Review data not ready")}}</p>`;
+          nativeJsonEl.textContent = JSON.stringify(payload, null, 2);
+          return;
+        }}
+        renderNative(payload);
+      }} catch (err) {{
+        nativeEl.innerHTML = `<p class="error">Failed to load native review data: ${{escapeHtml(err)}}</p>`;
+      }}
+    }}
+
+    async function completeNativeReview() {{
+      nativeCompleteButton.disabled = true;
+      nativeCompleteButton.textContent = "Finishing...";
+      try {{
+        const response = await fetch(completeUrl, {{method: "POST", cache: "no-store"}});
+        const payload = await response.json();
+        nativeJsonEl.textContent = JSON.stringify(payload, null, 2);
+        if (!response.ok) throw new Error(payload.error || "complete failed");
+        nativeEl.insertAdjacentHTML("afterbegin", `<p class="status done">Review completion request sent. Watch the job log for final render.</p>`);
+      }} catch (err) {{
+        nativeEl.insertAdjacentHTML("afterbegin", `<p class="error">Finish failed: ${{escapeHtml(err)}}</p>`);
+      }} finally {{
+        nativeCompleteButton.disabled = false;
+        nativeCompleteButton.textContent = "Finish with current/default data";
+      }}
     }}
 
     async function checkReviewServer() {{
@@ -158,6 +279,7 @@ def review_tab() -> HTMLResponse:
         if (data.ready) {{
           if (lastReady !== true) {{
             reloadFrame("server became ready");
+            loadNativeData();
           }} else {{
             setStatus("review server ready", "running");
           }}
@@ -173,7 +295,10 @@ def review_tab() -> HTMLResponse:
     }}
 
     reloadButton.addEventListener("click", () => reloadFrame("manual"));
+    nativeRefreshButton.addEventListener("click", loadNativeData);
+    nativeCompleteButton.addEventListener("click", completeNativeReview);
     checkReviewServer();
+    loadNativeData();
     setInterval(checkReviewServer, 2000);
   </script>
 </body>
@@ -199,6 +324,44 @@ async def review_status() -> JSONResponse:
             "review_url": proxy_url(REVIEW_PATH),
         }
     )
+
+
+@router.get("/review/native/data")
+async def native_review_data() -> JSONResponse:
+    try:
+        status, payload = await _upstream_json("/api/correction-data")
+    except httpx.HTTPError as exc:
+        return JSONResponse({"ready": False, "error": str(exc)}, status_code=502)
+
+    if status >= 400:
+        return JSONResponse({"ready": False, "status_code": status, "error": payload}, status_code=502)
+
+    if isinstance(payload, dict):
+        payload = dict(payload)
+        payload.setdefault("segments", _extract_segments(payload))
+    return JSONResponse(payload)
+
+
+@router.post("/review/native/complete")
+async def native_complete_review() -> JSONResponse:
+    try:
+        status, correction_data = await _upstream_json("/api/correction-data")
+        if status >= 400:
+            return JSONResponse({"ok": False, "stage": "load", "status_code": status, "error": correction_data}, status_code=502)
+
+        payload: dict[str, Any] = correction_data if isinstance(correction_data, dict) else {}
+        payload.setdefault("instrumental_selection", "with_backing")
+        payload.setdefault("is_duet", False)
+
+        complete_status, complete_payload = await _upstream_json("/api/complete", method="POST", json_body=payload)
+        if complete_status >= 400:
+            return JSONResponse(
+                {"ok": False, "stage": "complete", "status_code": complete_status, "error": complete_payload},
+                status_code=502,
+            )
+        return JSONResponse({"ok": True, "status_code": complete_status, "response": complete_payload})
+    except httpx.HTTPError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
 
 
 @router.api_route("/review-proxy/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
