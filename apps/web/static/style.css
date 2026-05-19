@@ -123,3 +123,39 @@ dl {
 
 dt { color: #cfc5d8; font-weight: 800; }
 dd { margin: 0; }
+
+.tabs {
+  display: flex;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.tabs a {
+  color: #f0d56b;
+  text-decoration: none;
+  font-weight: 800;
+  padding: 8px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.muted {
+  color: #cfc5d8;
+}
+
+.review-main {
+  max-width: 1400px;
+}
+
+.review-panel {
+  padding: 16px;
+}
+
+.review-frame {
+  width: 100%;
+  height: calc(100vh - 240px);
+  min-height: 720px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 18px;
+  background: #fff;
+}
