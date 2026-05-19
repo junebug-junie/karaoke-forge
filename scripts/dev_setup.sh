@@ -8,14 +8,14 @@ source .venv/bin/activate
 python -m pip install --upgrade pip wheel setuptools
 python -m pip install -e ".[generator,dev]"
 
-cat > .env.local <<'ENV'
-KARAOKE_FORGE_ROOT=/mnt/scripts/karaoke-forge
-WHISPER_MODEL_SIZE=medium
-WHISPER_DEVICE=cuda
-ENABLE_LOCAL_WHISPER=true
-ENV
+if [ ! -f .env.local ]; then
+  cp .env.example .env.local
+  echo "Created .env.local from .env.example"
+else
+  echo ".env.local already exists; leaving it unchanged"
+fi
 
 echo "Setup complete. Run:"
 echo "  source .venv/bin/activate"
 echo "  set -a && source .env.local && set +a"
-echo "  uvicorn packages.karaoke_forge.web:app --host 0.0.0.0 --port 8790"
+echo "  ./scripts/run_dev.sh"
