@@ -114,12 +114,36 @@ def align_canonical_lines_to_segments(
     return aligned
 
 
-def tail_junk_segment_indexes(aligned: list[str | None]) -> list[int]:
-    """Segments after the last aligned row are usually Whisper outro/noise."""
+def tail_junk_segment_indexes(
+    aligned: list[str | None],
+    segments: list[dict[str, Any]] | None = None,
+    canonical_lines: list[str] | None = None,
+    *,
+    min_score: float = 0.38,
+) -> list[int]:
+    """Segments after the last aligned row that do not match any canonical line."""
     last_aligned = max((idx for idx, line in enumerate(aligned) if line), default=-1)
     if last_aligned < 0:
         return []
-    return [idx for idx in range(last_aligned + 1, len(aligned))]
+
+    candidates = [idx for idx in range(last_aligned + 1, len(aligned))]
+    if not segments or not canonical_lines:
+        return candidates
+
+    line_norms = [normalize_lyric_text(line) for line in canonical_lines]
+    junk: list[int] = []
+    for idx in candidates:
+        if idx >= len(segments) or not isinstance(segments[idx], dict):
+            junk.append(idx)
+            continue
+        segment_norm = normalize_lyric_text(_segment_text_value(segments[idx]))
+        if not segment_norm:
+            junk.append(idx)
+            continue
+        best_score = max((_match_score(segment_norm, line_norm) for line_norm in line_norms), default=0.0)
+        if best_score < min_score:
+            junk.append(idx)
+    return junk
 
 
 def alignment_summary(
@@ -128,7 +152,7 @@ def alignment_summary(
     aligned: list[str | None],
 ) -> dict[str, Any]:
     matched = sum(1 for line in aligned if line)
-    junk = tail_junk_segment_indexes(aligned)
+    junk = tail_junk_segment_indexes(aligned, segments, canonical_lines)
     return {
         "canonical_line_count": len(canonical_lines),
         "segment_count": len(segments),

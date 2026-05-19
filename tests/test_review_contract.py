@@ -192,7 +192,7 @@ def test_native_data_includes_canonical_lyrics_from_active_job(client, tmp_path,
 
     set_active_job_id(job.id)
     payload = {
-        "corrected_segments": [{"text": "line", "start_time": 1.0, "end_time": 2.0}],
+        "corrected_segments": [{"text": "Behind the red door", "start_time": 1.0, "end_time": 2.0}],
         "original_segments": [{"text": "whisper"}],
     }
     with patch("packages.karaoke_forge.review_proxy._upstream_json", new=AsyncMock(return_value=(200, payload))):
@@ -202,6 +202,77 @@ def test_native_data_includes_canonical_lyrics_from_active_job(client, tmp_path,
     assert body["canonical_lyrics_lines"] == ["Behind the red door", "On the dirty floor"]
     assert body["canonical_lyrics_source"] == str(lyrics_path)
     assert body["canonical_lyrics_job_id"] == job.id
+    assert body["canonical_lines_aligned"] == ["Behind the red door"]
+    assert body["tail_junk_indexes"] == []
+    assert body["alignment_debug"]["aligned_segment_count"] == 1
+
+
+def test_native_complete_trims_tail_junk_with_lyrics(client, tmp_path, monkeypatch):
+    db_path = tmp_path / "forge.sqlite3"
+    monkeypatch.setenv("KARAOKE_FORGE_DB", str(db_path))
+    monkeypatch.setenv("KARAOKE_FORGE_LIBRARY", str(tmp_path / "library"))
+    monkeypatch.setattr("packages.karaoke_forge.store.DB_PATH", db_path)
+    init_db()
+    lyrics_path = tmp_path / "lyrics.txt"
+    lyrics_path.write_text("Only line\n", encoding="utf-8")
+    job = create_job(
+        artist="A",
+        title="B",
+        source_audio_path=tmp_path / "audio.wav",
+        lyrics_path=lyrics_path,
+        job_dir=tmp_path / "job",
+        output_dir=tmp_path / "out",
+        log_path=tmp_path / "job.log",
+        metadata={"run_dir": str(tmp_path / "run")},
+    )
+    update_job(job.id, status="running", started_at="2026-05-19T08:00:00+00:00")
+    from packages.karaoke_forge.job_lifecycle import set_active_job_id
+
+    set_active_job_id(job.id)
+    monkeypatch.setattr("packages.karaoke_forge.job_lifecycle.list_karaoke_gen_processes", lambda: [])
+    correction = {
+        "corrected_segments": [
+            {"text": "Only line", "start_time": 1.0, "end_time": 2.0, "words": [{"text": "Only", "start_time": 1.0, "end_time": 1.5}]},
+            {"text": "whisper outro noise", "start_time": 10.0, "end_time": 12.0},
+        ],
+        "original_segments": [{"text": "only"}, {"text": "noise"}],
+    }
+
+    async def fake_upstream(path, *, method="GET", json_body=None):
+        if path == "/api/correction-data":
+            return 200, correction
+        if path == "/api/complete" and method == "POST":
+            assert len(json_body["corrected_segments"]) == 1
+            assert json_body["corrected_segments"][0]["text"] == "Only line"
+            return 200, {"status": "ok"}
+        raise AssertionError(path)
+
+    with patch("packages.karaoke_forge.review_proxy._upstream_json", new=AsyncMock(side_effect=fake_upstream)):
+        response = client.post(
+            "/karaoke-forge/review/native/complete",
+            json={"segment_edits": []},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["tail_trimmed"] == 1
+
+
+def test_timing_edit_resyncs_words(client):
+    segment = {
+        "text": "hello",
+        "start_time": 1.0,
+        "end_time": 2.0,
+        "words": [{"id": "w0", "text": "hello", "start_time": 1.0, "end_time": 2.0}],
+    }
+    payload = {"corrected_segments": [segment]}
+    _apply_segment_edits_to_corrected_segments(
+        payload,
+        [{"index": 0, "text": "hello", "start": "3", "end": "5"}],
+    )
+    assert segment["start_time"] == 3.0
+    assert segment["end_time"] == 5.0
+    assert segment["words"][0]["start_time"] == 3.0
+    assert segment["words"][0]["end_time"] == 5.0
 
 
 def test_native_complete_persists_review_metadata(client, tmp_path, monkeypatch):

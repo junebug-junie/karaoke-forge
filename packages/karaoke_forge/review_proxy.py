@@ -223,16 +223,24 @@ def _segment_words_text(segment: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
-def _resync_segment_words_to_text(segment: dict[str, Any]) -> bool:
+def _resync_segment_words_to_text(segment: dict[str, Any], *, force: bool = False) -> bool:
     """karaoke-gen ASS karaoke uses segment.words; keep them aligned with segment.text."""
     text = _segment_text(segment).strip()
     if not text:
         return False
-    if _segment_words_text(segment).strip() == text:
-        return False
 
     start = _segment_time(segment, SEGMENT_START_KEYS) or 0.0
     end = _segment_time(segment, SEGMENT_END_KEYS) or start
+    if not force and _segment_words_text(segment).strip() == text:
+        words = segment.get("words")
+        if (
+            isinstance(words, list)
+            and len(words) == 1
+            and isinstance(words[0], dict)
+            and words[0].get("start_time") == start
+            and words[0].get("end_time") == end
+        ):
+            return False
     words = segment.get("words")
     template: dict[str, Any] = {}
     word_id = f"{segment.get('id', 'seg')}:w0"
@@ -298,6 +306,9 @@ def _apply_text_and_timing(segment: dict[str, Any], edit: dict[str, Any]) -> tup
     if end is not None and end != _segment_time(segment, SEGMENT_END_KEYS):
         if _set_segment_time(segment, SEGMENT_END_KEYS, end):
             timing_edits += 1
+
+    if timing_edits:
+        _resync_segment_words_to_text(segment, force=True)
 
     return text_edits, timing_edits
 
@@ -399,7 +410,7 @@ def _resync_all_segment_words(data: Any) -> int:
         return 0
     resynced = 0
     for segment in corrected[0]:
-        if isinstance(segment, dict) and _resync_segment_words_to_text(segment):
+        if isinstance(segment, dict) and _resync_segment_words_to_text(segment, force=True):
             resynced += 1
     return resynced
 
@@ -878,7 +889,7 @@ HTML_TEMPLATE = """<!doctype html>
           method: "POST",
           cache: "no-store",
           headers: {"content-type": "application/json"},
-          body: JSON.stringify({segment_edits: segmentEdits, tail_junk_indexes: Array.from(tailJunkIndexes)}),
+          body: JSON.stringify({segment_edits: segmentEdits}),
         });
         const payload = await response.json();
         nativeJsonEl.textContent = JSON.stringify(payload, null, 2);
@@ -1047,16 +1058,9 @@ async def native_complete_review(request: Request, instrumental_selection: str |
         corrected_segments = _extract_segment_dicts(corrected[0] if corrected else None)
         canonical_lines = canonical_meta.get("canonical_lyrics_lines") or []
         aligned, _alignment_debug = _canonical_alignment_for_payload(corrected_segments, canonical_lines)
-        client_tail_indexes = body.get("tail_junk_indexes") if isinstance(body.get("tail_junk_indexes"), list) else []
-        client_tail_set: set[int] = set()
-        for raw in client_tail_indexes:
-            try:
-                client_tail_set.add(int(raw))
-            except (TypeError, ValueError):
-                continue
         tail_indexes: list[int] = []
         if canonical_lines:
-            tail_indexes = sorted(set(tail_junk_segment_indexes(aligned)) | client_tail_set)
+            tail_indexes = tail_junk_segment_indexes(aligned, corrected_segments, canonical_lines)
         trim_debug = _delete_corrected_segment_indexes(payload, tail_indexes) if tail_indexes else {"tail_trimmed": 0}
         words_resynced = _resync_all_segment_words(payload)
 

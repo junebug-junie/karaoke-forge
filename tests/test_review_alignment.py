@@ -26,3 +26,14 @@ def test_align_matches_by_text_not_row_index():
 def test_tail_junk_indexes_only_after_last_aligned():
     aligned = ["line a", "line a", "line b", None, None]
     assert tail_junk_segment_indexes(aligned) == [3, 4]
+
+
+def test_tail_junk_skips_unaligned_segment_that_matches_canonical():
+    aligned = ["line a", "line a", None]
+    segments = [
+        {"text": "line a"},
+        {"text": "line a"},
+        {"text": "line b real"},
+    ]
+    canonical = ["line a", "line b real"]
+    assert tail_junk_segment_indexes(aligned, segments, canonical) == []
