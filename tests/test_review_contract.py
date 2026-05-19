@@ -16,7 +16,9 @@ from packages.karaoke_forge.review_contract import (
 )
 from packages.karaoke_forge.review_proxy import (
     _apply_segment_edits_to_corrected_segments,
+    _delete_corrected_segment_indexes,
     _find_corrected_segments,
+    _resync_segment_words_to_text,
 )
 from packages.karaoke_forge.runner import run_job
 from packages.karaoke_forge.store import create_job, get_job, init_db, update_job
@@ -77,6 +79,41 @@ def test_segments_digest_and_preview():
     assert preview["last"] == ["three", "four"]
 
 
+def test_text_edit_resyncs_words_for_final_render():
+    segment = {
+        "text": "old line",
+        "start_time": 1.0,
+        "end_time": 2.0,
+        "words": [
+            {"id": "w0", "text": "old", "start_time": 1.0, "end_time": 1.5},
+            {"id": "w1", "text": "line", "start_time": 1.5, "end_time": 2.0},
+        ],
+    }
+    payload = {"corrected_segments": [segment]}
+    _apply_segment_edits_to_corrected_segments(
+        payload,
+        [{"index": 0, "text": "new line", "start": "1", "end": "2"}],
+    )
+    assert segment["text"] == "new line"
+    assert segment["words"][0]["text"] == "new line"
+    assert segment["words"][0]["start_time"] == 1.0
+    assert segment["words"][0]["end_time"] == 2.0
+
+
+def test_delete_tail_segment_indexes():
+    payload = {
+        "corrected_segments": [
+            {"text": f"line {idx}", "start_time": float(idx), "end_time": float(idx + 1)}
+            for idx in range(5)
+        ],
+    }
+    debug = _delete_corrected_segment_indexes(payload, [3, 4])
+    corrected = _find_corrected_segments(payload)[0]
+    assert debug["tail_trimmed"] == 2
+    assert len(corrected) == 3
+    assert corrected[-1]["text"] == "line 2"
+
+
 def test_apply_edits_mutates_corrected_segments_and_mirrors_segments():
     payload = {
         "corrected_segments": [
@@ -131,6 +168,40 @@ def test_native_data_ready_with_corrected_segments(client):
     assert body["ready"] is True
     assert body["segments"][0]["text"] == "line"
     assert body["original_segment_texts"] == ["whisper"]
+
+
+def test_native_data_includes_canonical_lyrics_from_active_job(client, tmp_path, monkeypatch):
+    db_path = tmp_path / "forge.sqlite3"
+    monkeypatch.setenv("KARAOKE_FORGE_DB", str(db_path))
+    monkeypatch.setenv("KARAOKE_FORGE_LIBRARY", str(tmp_path / "library"))
+    monkeypatch.setattr("packages.karaoke_forge.store.DB_PATH", db_path)
+    init_db()
+    lyrics_path = tmp_path / "lyrics.txt"
+    lyrics_path.write_text("Behind the red door\nOn the dirty floor\n", encoding="utf-8")
+    job = create_job(
+        artist="A.A. Bondy",
+        title="Surfer King",
+        source_audio_path=tmp_path / "audio.wav",
+        lyrics_path=lyrics_path,
+        job_dir=tmp_path / "job",
+        output_dir=tmp_path / "out",
+        log_path=tmp_path / "job.log",
+        metadata={"run_dir": str(tmp_path / "run")},
+    )
+    from packages.karaoke_forge.job_lifecycle import set_active_job_id
+
+    set_active_job_id(job.id)
+    payload = {
+        "corrected_segments": [{"text": "line", "start_time": 1.0, "end_time": 2.0}],
+        "original_segments": [{"text": "whisper"}],
+    }
+    with patch("packages.karaoke_forge.review_proxy._upstream_json", new=AsyncMock(return_value=(200, payload))):
+        response = client.get("/karaoke-forge/review/native/data")
+    body = response.json()
+    assert response.status_code == 200
+    assert body["canonical_lyrics_lines"] == ["Behind the red door", "On the dirty floor"]
+    assert body["canonical_lyrics_source"] == str(lyrics_path)
+    assert body["canonical_lyrics_job_id"] == job.id
 
 
 def test_native_complete_persists_review_metadata(client, tmp_path, monkeypatch):

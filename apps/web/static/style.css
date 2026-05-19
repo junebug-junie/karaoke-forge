@@ -338,6 +338,14 @@ code {
   background: rgba(240, 213, 107, 0.05);
 }
 
+.review-table tr.tail-junk {
+  background: rgba(255, 120, 120, 0.08);
+}
+
+.review-table tr.tail-junk .row-delete {
+  border-color: rgba(255, 120, 120, 0.45);
+}
+
 .marked-delete {
   opacity: 0.62;
   background: rgba(255, 102, 102, 0.08);

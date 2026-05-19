@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import html
+from pathlib import Path
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
-from .config import DEFAULT_INSTRUMENTAL_SELECTION, PUBLIC_BASE_PATH, ROOT_DIR
-from .job_lifecycle import get_active_job_id
+from .config import DEFAULT_INSTRUMENTAL_SELECTION, DEFAULT_SUBTITLE_OFFSET_MS, PUBLIC_BASE_PATH, ROOT_DIR
+from .job_lifecycle import active_review_job, get_active_job_id
+from .store import get_job
+from .review_alignment import (
+    align_canonical_lines_to_segments,
+    alignment_summary,
+    tail_junk_segment_indexes,
+)
 from .review_contract import review_payload_summary, segments_preview_texts, segments_text_digest
 from .review_gate import mark_review_complete
 
@@ -201,6 +208,52 @@ def _parse_timestamp_seconds(value: Any) -> float | None:
     return None
 
 
+def _segment_words_text(segment: dict[str, Any]) -> str:
+    words = segment.get("words")
+    if not isinstance(words, list):
+        return ""
+    parts: list[str] = []
+    for word in words:
+        if not isinstance(word, dict):
+            continue
+        token = word.get("text") or word.get("word") or ""
+        token = str(token).strip()
+        if token:
+            parts.append(token)
+    return " ".join(parts)
+
+
+def _resync_segment_words_to_text(segment: dict[str, Any]) -> bool:
+    """karaoke-gen ASS karaoke uses segment.words; keep them aligned with segment.text."""
+    text = _segment_text(segment).strip()
+    if not text:
+        return False
+    if _segment_words_text(segment).strip() == text:
+        return False
+
+    start = _segment_time(segment, SEGMENT_START_KEYS) or 0.0
+    end = _segment_time(segment, SEGMENT_END_KEYS) or start
+    words = segment.get("words")
+    template: dict[str, Any] = {}
+    word_id = f"{segment.get('id', 'seg')}:w0"
+    if isinstance(words, list) and words and isinstance(words[0], dict):
+        word_id = str(words[0].get("id") or word_id)
+        for key in ("confidence", "created_during_correction", "singer"):
+            if key in words[0]:
+                template[key] = words[0][key]
+
+    segment["words"] = [
+        {
+            "id": word_id,
+            "text": text,
+            "start_time": start,
+            "end_time": end,
+            **template,
+        }
+    ]
+    return True
+
+
 def _set_segment_text(segment: dict[str, Any], text: str) -> bool:
     updated = False
     for key in SEGMENT_TEXT_KEYS:
@@ -210,6 +263,8 @@ def _set_segment_text(segment: dict[str, Any], text: str) -> bool:
     if not updated:
         segment["text"] = text
         updated = True
+    if updated:
+        _resync_segment_words_to_text(segment)
     return updated
 
 
@@ -338,6 +393,84 @@ def _apply_segment_edits_to_corrected_segments(data: Any, edits: Any) -> dict[st
     return result
 
 
+def _resync_all_segment_words(data: Any) -> int:
+    corrected = _find_corrected_segments(data)
+    if corrected is None:
+        return 0
+    resynced = 0
+    for segment in corrected[0]:
+        if isinstance(segment, dict) and _resync_segment_words_to_text(segment):
+            resynced += 1
+    return resynced
+
+
+def _delete_corrected_segment_indexes(data: Any, delete_indexes: list[int]) -> dict[str, Any]:
+    corrected = _find_corrected_segments(data)
+    if corrected is None or not delete_indexes:
+        return {"tail_trimmed": 0, "deleted_indexes": []}
+    corrected_segments, _corrected_path = corrected
+    before = len(corrected_segments)
+    corrections = _find_parallel_corrections(data, before)
+    corrections_list = corrections[0] if corrections else None
+    deleted: list[int] = []
+    for idx in sorted({int(i) for i in delete_indexes if isinstance(i, int) or str(i).isdigit()}, reverse=True):
+        if idx < 0 or idx >= len(corrected_segments):
+            continue
+        del corrected_segments[idx]
+        if corrections_list is not None and idx < len(corrections_list):
+            del corrections_list[idx]
+        deleted.append(idx)
+    deleted.sort()
+    return {"tail_trimmed": len(deleted), "deleted_indexes": deleted}
+
+
+def _canonical_alignment_for_payload(
+    segments: list[dict[str, Any]],
+    canonical_lines: list[str],
+) -> tuple[list[str | None], dict[str, Any]]:
+    aligned = align_canonical_lines_to_segments(segments, canonical_lines)
+    summary = alignment_summary(segments, canonical_lines, aligned)
+    return aligned, summary
+
+
+def _read_lyrics_lines(path: Path) -> list[str]:
+    return [line.strip() for line in path.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
+
+
+def _resolve_active_job_id() -> str | None:
+    active_id = get_active_job_id()
+    if active_id:
+        return active_id
+    job = active_review_job()
+    return job.id if job else None
+
+
+def _canonical_lyrics_payload(active_job_id: str | None) -> dict[str, Any]:
+    empty = {
+        "canonical_lyrics_lines": [],
+        "canonical_lyrics_source": None,
+        "canonical_lyrics_job_id": None,
+        "canonical_lyrics_title": None,
+    }
+    if not active_job_id:
+        return empty
+
+    job = get_job(active_job_id)
+    if job is None or not job.lyrics_path:
+        return empty
+
+    path = Path(job.lyrics_path)
+    if not path.is_file():
+        return empty
+
+    return {
+        "canonical_lyrics_lines": _read_lyrics_lines(path),
+        "canonical_lyrics_source": str(path),
+        "canonical_lyrics_job_id": job.id,
+        "canonical_lyrics_title": f"{job.artist} — {job.title}",
+    }
+
+
 def _review_contract_debug(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {
@@ -414,16 +547,19 @@ HTML_TEMPLATE = """<!doctype html>
       <div class="button-row">
         <span id="review-status" class="status queued">checking review API...</span>
         <button type="button" id="native-refresh">Refresh native data</button>
-        <button type="button" id="apply-canonical">Apply canonical lyrics by line order</button>
-        <button type="button" id="delete-after-canonical">Remove rows after final canonical lyric</button>
+        <button type="button" id="apply-resolved">Apply resolved lyrics to rows</button>
+        <button type="button" id="remove-tail-junk">Remove outro junk rows</button>
         <button type="button" id="native-complete">Finish with selected data</button>
         <button type="button" id="review-reload">Reload iframe debug</button>
       </div>
       <p class="muted">Default instrumental selection: <code id="default-instrumental">__DEFAULT_INSTRUMENTAL__</code></p>
-      <section class="canonical-lyrics-panel">
-        <h2>Canonical lyrics for this review</h2>
-        <p class="muted">Paste the finite lyric script here for this active review only. Nothing is pulled from older jobs.</p>
-        <textarea id="canonical-lyrics-text" class="canonical-lyrics-text" rows="10" placeholder="Paste one lyric line per row..."></textarea>
+      <section id="canonical-lyrics-panel" class="canonical-lyrics-panel">
+        <h2>Job lyrics</h2>
+        <p id="canonical-lyrics-summary" class="muted">Uses the lyrics you submitted when starting this job (<code>lyrics.txt</code>). <strong>Resolved</strong> matches by text similarity (not row number). Finish removes outro junk rows only. Subtitle offset for this job: <code>+__SUBTITLE_OFFSET_MS__ms</code>.</p>
+        <details id="canonical-lyrics-override" class="debug-details">
+          <summary>Override job lyrics (optional)</summary>
+          <textarea id="canonical-lyrics-text" class="canonical-lyrics-text" rows="8" placeholder="Only needed if you did not submit lyrics at job start..."></textarea>
+        </details>
       </section>
       <div id="native-review" class="native-review">Loading review data...</div>
       <details class="debug-details" open>
@@ -446,6 +582,11 @@ HTML_TEMPLATE = """<!doctype html>
     const dataUrl = "__DATA_URL__";
     const completeUrl = "__COMPLETE_URL__";
     const canonicalStorageKey = "karaokeForge.nativeReview.canonicalLyrics";
+    let canonicalJobId = "";
+    let serverCanonicalLines = [];
+    let alignedCanonicalLines = [];
+    let tailJunkIndexes = new Set();
+    let lastNativePayload = null;
     const frame = document.getElementById("review-frame");
     const statusEl = document.getElementById("review-status");
     const nativeEl = document.getElementById("native-review");
@@ -455,8 +596,8 @@ HTML_TEMPLATE = """<!doctype html>
     const reloadButton = document.getElementById("review-reload");
     const nativeRefreshButton = document.getElementById("native-refresh");
     const nativeCompleteButton = document.getElementById("native-complete");
-    const applyCanonicalButton = document.getElementById("apply-canonical");
-    const deleteAfterCanonicalButton = document.getElementById("delete-after-canonical");
+    const applyResolvedButton = document.getElementById("apply-resolved");
+    const removeTailJunkButton = document.getElementById("remove-tail-junk");
     let lastReady = null;
     let completionRequested = false;
     let removedSegmentIndexes = [];
@@ -468,14 +609,65 @@ HTML_TEMPLATE = """<!doctype html>
       statusEl.textContent = text;
       statusEl.className = "status " + cls;
     }
+    function canonicalStorageKeyFor(jobId) {
+      return jobId ? `${canonicalStorageKey}.${jobId}` : canonicalStorageKey;
+    }
     function parseCanonicalLines() {
       return canonicalLyricsEl.value.split(/\\r?\\n/).map(line => line.trim()).filter(Boolean);
     }
-    function persistCanonicalLyrics() {
-      try { localStorage.setItem(canonicalStorageKey, canonicalLyricsEl.value); } catch (err) {}
+    function effectiveCanonicalLines() {
+      const localLines = parseCanonicalLines();
+      return localLines.length ? localLines : serverCanonicalLines;
     }
-    function restoreCanonicalLyrics() {
-      try { canonicalLyricsEl.value = localStorage.getItem(canonicalStorageKey) || ""; } catch (err) { canonicalLyricsEl.value = ""; }
+    function alignedCanonicalForRow(idx) {
+      if (alignedCanonicalLines[idx]) return alignedCanonicalLines[idx];
+      return "";
+    }
+    function persistCanonicalLyrics() {
+      try { localStorage.setItem(canonicalStorageKeyFor(canonicalJobId), canonicalLyricsEl.value); } catch (err) {}
+    }
+    function restoreCanonicalLyrics(jobId) {
+      canonicalJobId = jobId || "";
+      try { canonicalLyricsEl.value = localStorage.getItem(canonicalStorageKeyFor(canonicalJobId)) || ""; } catch (err) { canonicalLyricsEl.value = ""; }
+    }
+    function updateCanonicalSummary(payload) {
+      const summary = document.getElementById("canonical-lyrics-summary");
+      const override = document.getElementById("canonical-lyrics-override");
+      if (!summary) return;
+      const lines = payload.canonical_lyrics_lines || [];
+      const source = payload.canonical_lyrics_source;
+      if (lines.length && source) {
+        summary.innerHTML = `Loaded <code>${lines.length}</code> line(s) from <code>${escapeHtml(source)}</code> (submitted at job start). Edit <strong>Corrected lyric</strong> below; Finish drops extra Whisper tail rows beyond your script.`;
+        if (override) override.open = false;
+      } else {
+        summary.textContent = "No job lyrics file on this run — expand Override below, or paste lyrics when starting the job next time.";
+        if (override) override.open = true;
+      }
+    }
+    function seedCanonicalLyricsFromServer(payload) {
+      serverCanonicalLines = Array.isArray(payload.canonical_lyrics_lines) ? payload.canonical_lyrics_lines : [];
+      alignedCanonicalLines = Array.isArray(payload.canonical_lines_aligned) ? payload.canonical_lines_aligned : [];
+      tailJunkIndexes = new Set(Array.isArray(payload.tail_junk_indexes) ? payload.tail_junk_indexes : []);
+      const jobId = payload.review_debug?.active_job_id || payload.canonical_lyrics_job_id || "";
+      restoreCanonicalLyrics(jobId);
+      if (!canonicalLyricsEl.value.trim() && serverCanonicalLines.length) {
+        canonicalLyricsEl.value = serverCanonicalLines.join("\\n");
+        persistCanonicalLyrics();
+      }
+      updateCanonicalSummary(payload);
+    }
+    function canonicalPreviewHtml(idx, canonicalLine) {
+      return canonicalLine
+        ? `<div class="pasted-line">${escapeHtml(canonicalLine)}</div><button type="button" data-use-canonical="${idx}">Use canonical</button>`
+        : `<span class="muted">no canonical line</span>`;
+    }
+    function refreshCanonicalPreviewCells() {
+      document.querySelectorAll("tr[data-segment-index]").forEach(row => {
+        const idx = Number(row.dataset.segmentIndex);
+        const cell = row.querySelector(".canonical-preview-cell");
+        if (!cell) return;
+        cell.innerHTML = canonicalPreviewHtml(idx, alignedCanonicalForRow(idx));
+      });
     }
     function segmentText(seg) {
       return seg.text || seg.corrected_text || seg.lyrics || seg.line || "";
@@ -574,41 +766,33 @@ HTML_TEMPLATE = """<!doctype html>
       }
       return edits.filter(edit => edit.delete || edit.text !== edit.original_text || String(edit.start) !== String(edit.original_start) || String(edit.end) !== String(edit.original_end));
     }
-    function setRowTextFromCanonical(row, canonicalLines) {
-      const idx = Number(row.dataset.segmentIndex);
-      const canonicalLine = canonicalLines[idx];
-      if (!canonicalLine) return false;
+    function setRowTextFromLine(row, line) {
+      if (!line) return false;
       const textEl = row.querySelector("textarea[data-field='text']");
       if (!textEl) return false;
-      textEl.value = canonicalLine;
+      textEl.value = line;
       row.classList.add("lyrics-applied");
       refreshRowState(row);
       return true;
     }
-    function applyCanonicalLyricsByLineOrder() {
-      persistCanonicalLyrics();
-      const canonicalLines = parseCanonicalLines();
+    function applyResolvedLyricsToRows() {
       let applied = 0;
       document.querySelectorAll("tr[data-segment-index]").forEach(row => {
         const idx = Number(row.dataset.segmentIndex);
-        if (idx >= canonicalLines.length) return;
-        if (setRowTextFromCanonical(row, canonicalLines)) applied += 1;
+        if (setRowTextFromLine(row, alignedCanonicalForRow(idx))) applied += 1;
       });
-      setStatus(`applied ${applied} canonical lyric line(s); timings preserved`, "done");
+      setStatus(`applied resolved lyrics to ${applied} row(s); timings preserved`, "done");
     }
-    function removeRowsAfterFinalCanonicalLyric() {
-      persistCanonicalLyrics();
-      const canonicalLines = parseCanonicalLines();
+    function removeTailJunkRows() {
       const removedIndexes = [];
       document.querySelectorAll("tr[data-segment-index]").forEach(row => {
         const idx = Number(row.dataset.segmentIndex);
-        if (idx >= canonicalLines.length) {
-          removedIndexes.push(idx);
-          row.remove();
-        }
+        if (!tailJunkIndexes.has(idx)) return;
+        removedIndexes.push(idx);
+        row.remove();
       });
       removedSegmentIndexes = Array.from(new Set([...removedSegmentIndexes, ...removedIndexes])).sort((a, b) => a - b);
-      setStatus(`removed ${removedIndexes.length} tail row(s) after canonical line ${canonicalLines.length}; indexes ${removedIndexes.join(", ") || "none"}`, "done");
+      setStatus(`removed ${removedIndexes.length} outro junk row(s); indexes ${removedIndexes.join(", ") || "none"}`, "done");
     }
     function reloadFrame(reason) {
       const base = frame.dataset.src;
@@ -617,6 +801,8 @@ HTML_TEMPLATE = """<!doctype html>
       setStatus("review API ready — iframe reloaded (" + reason + ")", "running");
     }
     function renderNative(payload) {
+      lastNativePayload = payload;
+      seedCanonicalLyricsFromServer(payload);
       nativeJsonEl.textContent = JSON.stringify(payload, null, 2);
       contractJsonEl.textContent = JSON.stringify(payload.review_debug || {}, null, 2);
       const segments = payload.segments || [];
@@ -624,17 +810,21 @@ HTML_TEMPLATE = """<!doctype html>
       const meta = payload.metadata || {};
       const debug = payload.review_debug || {};
       const originalTexts = payload.original_segment_texts || [];
-      const title = [meta.artist, meta.title].filter(Boolean).join(" — ") || "Current review session";
-      const canonicalLines = parseCanonicalLines();
+      const canonicalSource = payload.canonical_lyrics_source || "none";
+      const title = [meta.artist, meta.title].filter(Boolean).join(" — ") || payload.canonical_lyrics_title || "Current review session";
+      const alignment = payload.alignment_debug || {};
+      const tailJunkCount = tailJunkIndexes.size || alignment.tail_junk_count || 0;
       const rows = segments.length
         ? segments.map((seg, idx) => {
             const text = segmentText(seg);
             const originalText = originalTexts[idx] || segmentText(payload.original_segments?.[idx] || {});
-            const canonicalLine = canonicalLines[idx] || "";
-            const mismatch = canonicalLine && canonicalLine.trim() !== text.trim();
+            const resolvedLine = alignedCanonicalForRow(idx);
+            const mismatch = resolvedLine && resolvedLine.trim() !== text.trim();
+            const isTailJunk = tailJunkIndexes.has(idx);
             const startSeconds = secondsValue(seg.start ?? seg.start_time ?? 0) ?? 0;
             const endSeconds = secondsValue(seg.end ?? seg.end_time ?? 0) ?? 0;
-            return `<tr data-segment-index="${idx}" class="${mismatch ? "lyric-mismatch" : ""}"><td class="row-index">${idx + 1}</td><td>${renderTimeFields("start", startSeconds)}</td><td>${renderTimeFields("end", endSeconds)}</td><td class="duration-cell">${escapeHtml(formatDuration(startSeconds, endSeconds))}</td><td class="original-text">${escapeHtml(originalText || "—")}</td><td><textarea class="segment-edit" data-field="text" data-original-value="${escapeHtml(text)}" data-original-start="${startSeconds}" data-original-end="${endSeconds}" rows="2">${escapeHtml(text)}</textarea></td><td>${canonicalLine ? `<div class="pasted-line">${escapeHtml(canonicalLine)}</div><button type="button" data-use-canonical="${idx}">Use canonical</button>` : `<span class="muted">no canonical line</span>`}</td><td><span class="dirty-badge">clean</span></td><td><button type="button" class="row-delete" data-delete-row="${idx}">Remove</button></td></tr>`;
+            const rowClass = [mismatch ? "lyric-mismatch" : "", isTailJunk ? "tail-junk" : ""].filter(Boolean).join(" ");
+            return `<tr data-segment-index="${idx}" class="${rowClass}"><td class="row-index">${idx + 1}<br /><span class="muted">#${idx}</span></td><td>${renderTimeFields("start", startSeconds)}</td><td>${renderTimeFields("end", endSeconds)}</td><td class="duration-cell">${escapeHtml(formatDuration(startSeconds, endSeconds))}</td><td class="original-text">${escapeHtml(originalText || "—")}</td><td><textarea class="segment-edit" data-field="text" data-original-value="${escapeHtml(text)}" data-original-start="${startSeconds}" data-original-end="${endSeconds}" rows="2">${escapeHtml(text)}</textarea></td><td class="canonical-preview-cell">${canonicalPreviewHtml(idx, resolvedLine)}${isTailJunk ? `<span class="muted">outro junk</span>` : ""}</td><td><span class="dirty-badge">clean</span></td><td><button type="button" class="row-delete" data-delete-row="${idx}" title="Remove segment index ${idx}">Remove #${idx}</button></td></tr>`;
           }).join("")
         : `<tr><td colspan="9">No corrected_segments list found in correction payload. Use the contract debug drawer.</td></tr>`;
       const defaultSelection = document.getElementById("default-instrumental").textContent || "clean";
@@ -649,6 +839,8 @@ HTML_TEMPLATE = """<!doctype html>
         <h2>${escapeHtml(title)}</h2>
         <div class="debug-summary"><strong>Refresh debug:</strong> corrected_segments=<code>${escapeHtml(debug.corrected_segments_count ?? 0)}</code>, top-level segments=<code>${escapeHtml(debug.display_segments_count ?? 0)}</code>, payload keys=<code>${escapeHtml((debug.payload_keys || debug.raw_correction_payload_keys || []).join(", ") || "none")}</code>, review API=<code>${escapeHtml(debug.review_api_upstream || "unknown")}</code></div>
         <div class="debug-summary"><strong>Contract:</strong> display source <code>${escapeHtml(debug.display_segments_source_key || "none")}</code>, relation <code>${escapeHtml(debug.display_segments_relation || "unknown")}</code></div>
+        <div class="debug-summary"><strong>Canonical lyrics:</strong> <code>${escapeHtml(canonicalLines.length)}</code> line(s) from <code>${escapeHtml(canonicalSource)}</code></div>
+        ${tailJunkCount ? `<p class="status queued"><code>${tailJunkCount}</code> outro junk row(s) detected after the last matched lyric; use <strong>Remove outro junk rows</strong> or Finish will drop them.</p>` : ""}
         <h3>Instrumental options</h3>
         ${inst}
         <h3>Lyric segments</h3>
@@ -658,7 +850,6 @@ HTML_TEMPLATE = """<!doctype html>
       document.querySelectorAll("tr[data-segment-index]").forEach(attachRowListeners);
     }
     async function loadNativeData() {
-      persistCanonicalLyrics();
       removedSegmentIndexes = [];
       try {
         const response = await fetch(dataUrl, {cache: "no-store"});
@@ -687,7 +878,7 @@ HTML_TEMPLATE = """<!doctype html>
           method: "POST",
           cache: "no-store",
           headers: {"content-type": "application/json"},
-          body: JSON.stringify({segment_edits: segmentEdits}),
+          body: JSON.stringify({segment_edits: segmentEdits, tail_junk_indexes: Array.from(tailJunkIndexes)}),
         });
         const payload = await response.json();
         nativeJsonEl.textContent = JSON.stringify(payload, null, 2);
@@ -725,7 +916,7 @@ HTML_TEMPLATE = """<!doctype html>
       const useCanonical = event.target.closest("button[data-use-canonical]");
       if (useCanonical) {
         const row = useCanonical.closest("tr[data-segment-index]");
-        if (row && setRowTextFromCanonical(row, parseCanonicalLines())) setStatus("canonical lyric copied into row " + (Number(row.dataset.segmentIndex) + 1), "done");
+        if (row && setRowTextFromLine(row, alignedCanonicalForRow(Number(row.dataset.segmentIndex)))) setStatus("resolved lyric copied into row " + (Number(row.dataset.segmentIndex) + 1), "done");
         return;
       }
       const deleteButton = event.target.closest("button[data-delete-row]");
@@ -738,13 +929,12 @@ HTML_TEMPLATE = """<!doctype html>
         setStatus("row " + (idx + 1) + " removed; index " + idx + " will be deleted on finish", "done");
       }
     });
-    canonicalLyricsEl.addEventListener("input", persistCanonicalLyrics);
+    canonicalLyricsEl.addEventListener("input", () => { persistCanonicalLyrics(); refreshCanonicalPreviewCells(); });
     reloadButton.addEventListener("click", () => reloadFrame("manual"));
     nativeRefreshButton.addEventListener("click", loadNativeData);
     nativeCompleteButton.addEventListener("click", completeNativeReview);
-    applyCanonicalButton.addEventListener("click", applyCanonicalLyricsByLineOrder);
-    deleteAfterCanonicalButton.addEventListener("click", removeRowsAfterFinalCanonicalLyric);
-    restoreCanonicalLyrics();
+    applyResolvedButton.addEventListener("click", applyResolvedLyricsToRows);
+    removeTailJunkButton.addEventListener("click", removeTailJunkRows);
     checkReviewServer();
     loadNativeData();
     setInterval(checkReviewServer, 2000);
@@ -765,6 +955,7 @@ def review_tab() -> HTMLResponse:
         "__REVIEW_URL__": html.escape(public_url("/review")),
         "__CSS_URL__": html.escape(static_css_url()),
         "__DEFAULT_INSTRUMENTAL__": html.escape(DEFAULT_INSTRUMENTAL_SELECTION),
+        "__SUBTITLE_OFFSET_MS__": html.escape(str(DEFAULT_SUBTITLE_OFFSET_MS)),
     }
     html_text = HTML_TEMPLATE
     for placeholder, value in values.items():
@@ -799,7 +990,8 @@ async def native_review_data() -> JSONResponse:
     debug = _review_contract_debug(payload)
     debug["review_api_upstream"] = REVIEW_UPSTREAM
     debug["payload_keys"] = summary.get("payload_keys", [])
-    debug["active_job_id"] = get_active_job_id()
+    active_job_id = _resolve_active_job_id()
+    debug["active_job_id"] = active_job_id
 
     if not summary["ready"]:
         return JSONResponse(
@@ -821,6 +1013,14 @@ async def native_review_data() -> JSONResponse:
     response_payload["original_segment_texts"] = [_segment_text(seg) for seg in original_segments]
     response_payload["ready"] = True
     response_payload["review_debug"] = debug
+    canonical_meta = _canonical_lyrics_payload(active_job_id)
+    response_payload.update(canonical_meta)
+    canonical_lines = canonical_meta.get("canonical_lyrics_lines") or []
+    aligned, alignment_debug = _canonical_alignment_for_payload(display_segments, canonical_lines)
+    response_payload["canonical_lines_aligned"] = aligned
+    response_payload["alignment_debug"] = alignment_debug
+    response_payload["tail_junk_indexes"] = alignment_debug.get("tail_junk_indexes", [])
+    response_payload["subtitle_offset_ms"] = DEFAULT_SUBTITLE_OFFSET_MS
     return JSONResponse(response_payload)
 
 
@@ -840,7 +1040,25 @@ async def native_complete_review(request: Request, instrumental_selection: str |
 
         selection = (instrumental_selection or DEFAULT_INSTRUMENTAL_SELECTION or "clean").strip()
         payload: dict[str, Any] = correction_data
+        active_job_id = _resolve_active_job_id()
+        canonical_meta = _canonical_lyrics_payload(active_job_id)
         edit_debug = _apply_segment_edits_to_corrected_segments(payload, body.get("segment_edits"))
+        corrected = _find_corrected_segments(payload)
+        corrected_segments = _extract_segment_dicts(corrected[0] if corrected else None)
+        canonical_lines = canonical_meta.get("canonical_lyrics_lines") or []
+        aligned, _alignment_debug = _canonical_alignment_for_payload(corrected_segments, canonical_lines)
+        client_tail_indexes = body.get("tail_junk_indexes") if isinstance(body.get("tail_junk_indexes"), list) else []
+        client_tail_set: set[int] = set()
+        for raw in client_tail_indexes:
+            try:
+                client_tail_set.add(int(raw))
+            except (TypeError, ValueError):
+                continue
+        tail_indexes: list[int] = []
+        if canonical_lines:
+            tail_indexes = sorted(set(tail_junk_segment_indexes(aligned)) | client_tail_set)
+        trim_debug = _delete_corrected_segment_indexes(payload, tail_indexes) if tail_indexes else {"tail_trimmed": 0}
+        words_resynced = _resync_all_segment_words(payload)
 
         if not edit_debug["corrected_segments_found"]:
             return JSONResponse(
@@ -850,6 +1068,7 @@ async def native_complete_review(request: Request, instrumental_selection: str |
                     "error": "No corrected_segments list found; refusing to submit display-only edits.",
                     "review_debug": _review_contract_debug(payload),
                     **edit_debug,
+                    **trim_debug,
                 },
                 status_code=422,
             )
@@ -879,10 +1098,12 @@ async def native_complete_review(request: Request, instrumental_selection: str |
         corrected_list = corrected[0] if corrected is not None else []
         review_completed_debug = {
             "before_corrected_segments_count": edit_debug["before_corrected_segments_count"],
-            "after_corrected_segments_count": edit_debug["after_corrected_segments_count"],
+            "after_corrected_segments_count": len(corrected_list),
             "text_edit_count": edit_debug["text_edit_count"],
             "timing_edit_count": edit_debug["timing_edit_count"],
             "removed_indexes": edit_debug["removed_indexes"],
+            "tail_trimmed": trim_debug.get("tail_trimmed", 0),
+            "words_resynced": words_resynced,
             "outgoing_payload_top_level_keys": outgoing_payload_top_level_keys,
         }
         mark_review_complete(
@@ -909,6 +1130,7 @@ async def native_complete_review(request: Request, instrumental_selection: str |
                 },
                 "response": complete_payload,
                 **edit_debug,
+                **trim_debug,
             }
         )
     except httpx.HTTPError as exc:

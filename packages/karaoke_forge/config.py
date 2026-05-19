@@ -55,10 +55,10 @@ ENABLE_LOCAL_WHISPER = os.getenv("ENABLE_LOCAL_WHISPER", "true")
 SPACY_MODEL = os.getenv("SPACY_MODEL", "en_core_web_md")
 
 # Indie-karaoke-safe defaults. Clean instrumental avoids unstable lead-vocal
-# leakage from backing-vocal stems, and +300ms compensates for highlights that
+# leakage from backing-vocal stems, and +500ms compensates for highlights that
 # tend to fire slightly early after Whisper alignment.
 DEFAULT_INSTRUMENTAL_SELECTION = os.getenv("KARAOKE_DEFAULT_INSTRUMENTAL_SELECTION", "clean").strip() or "clean"
-DEFAULT_SUBTITLE_OFFSET_MS = _int_env("KARAOKE_DEFAULT_SUBTITLE_OFFSET_MS", 300)
+DEFAULT_SUBTITLE_OFFSET_MS = _int_env("KARAOKE_DEFAULT_SUBTITLE_OFFSET_MS", 500)
 
 
 def ensure_library_dirs() -> None:
