@@ -3,7 +3,27 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-ROOT_DIR = Path(os.getenv("KARAOKE_FORGE_ROOT", Path.cwd())).resolve()
+from dotenv import load_dotenv
+
+
+def _initial_root_dir() -> Path:
+    return Path(os.getenv("KARAOKE_FORGE_ROOT", Path.cwd())).resolve()
+
+
+ROOT_DIR = _initial_root_dir()
+ENV_LOCAL_PATH = ROOT_DIR / ".env.local"
+ENV_EXAMPLE_PATH = ROOT_DIR / ".env.example"
+
+# Load local machine configuration before reading any derived settings.
+# Existing real environment variables still win over values in .env.local.
+load_dotenv(ENV_LOCAL_PATH, override=False)
+
+# KARAOKE_FORGE_ROOT may itself be defined in .env.local, so resolve it once more
+# after loading the file.
+ROOT_DIR = _initial_root_dir()
+ENV_LOCAL_PATH = ROOT_DIR / ".env.local"
+ENV_EXAMPLE_PATH = ROOT_DIR / ".env.example"
+
 LIBRARY_DIR = Path(os.getenv("KARAOKE_FORGE_LIBRARY", ROOT_DIR / "library")).resolve()
 SONGS_DIR = LIBRARY_DIR / "songs"
 JOBS_DIR = LIBRARY_DIR / "jobs"
