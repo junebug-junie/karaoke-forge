@@ -1,10 +1,13 @@
 .venv/
 __pycache__/
 *.pyc
+.pytest_cache/
 
 library/songs/
 library/jobs/
 library/renders/
+library/*.sqlite3
+library/*.sqlite3-*
 
 .env
 .env.*
