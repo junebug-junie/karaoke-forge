@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
 FALSE_VALUES = {"0", "false", "no", "off"}
@@ -37,9 +39,33 @@ def review_payload_summary(payload: Any) -> dict[str, Any]:
     }
 
 
+def segment_texts(segments: Any) -> list[str]:
+    if not isinstance(segments, list):
+        return []
+    texts: list[str] = []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        text = segment.get("text") or segment.get("corrected_text") or segment.get("lyrics") or segment.get("line") or ""
+        texts.append(str(text).strip())
+    return texts
+
+
+def segments_text_digest(segments: Any) -> str:
+    payload = json.dumps(segment_texts(segments), ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def segments_preview_texts(segments: Any, *, count: int = 3) -> dict[str, list[str]]:
+    texts = segment_texts(segments)
+    if len(texts) <= count:
+        return {"first": texts, "last": []}
+    return {"first": texts[:count], "last": texts[-count:]}
+
+
 def review_gate_decision(*, returncode: int, review_seen: bool, require_review_payload: bool = True) -> tuple[bool, str | None]:
     if returncode != 0:
         return False, f"karaoke-gen exited with {returncode}; see log"
     if require_review_payload and not review_seen:
-        return False, "karaoke-gen exited before Forge observed a corrected_segments review payload; refusing to collect default renders"
+        return False, "karaoke-gen exited before Forge observed review completion; refusing to collect default renders"
     return True, None

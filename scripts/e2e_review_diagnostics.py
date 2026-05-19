@@ -169,7 +169,7 @@ def main() -> int:
     print(f"run_dir: {metadata.get('run_dir')}")
     print(f"log_path: {job.get('log_path')}")
     print(f"auto_advance_stdin: {metadata.get('auto_advance_stdin')}")
-    print(f"review_payload_seen: {metadata.get('review_payload_seen')}")
+    print(f"review_completed_seen: {metadata.get('review_completed_seen')}")
     print(f"review_ready_at: {metadata.get('review_ready_at')}")
 
     log_state = path_state(job.get("log_path"))
@@ -214,10 +214,10 @@ def main() -> int:
         if not state["exists"]:
             failures.append(f"render output missing on disk: {path_text}")
 
-    if render_outputs and metadata.get("review_payload_seen") is False:
-        failures.append("job has render_outputs even though metadata says review_payload_seen=False")
-    if render_outputs and metadata.get("review_payload_seen") is None:
-        warnings.append("job has render_outputs but no review_payload_seen metadata; this may be an older unsafe run")
+    if render_outputs and metadata.get("review_completed_seen") is False:
+        failures.append("job has render_outputs even though metadata says review_completed_seen=False")
+    if render_outputs and metadata.get("review_completed_seen") is None:
+        warnings.append("job has render_outputs but no review_completed_seen metadata; this may be an older unsafe run")
 
     print("\n== Verdict ==")
     for warning in warnings:

@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 
 source .venv/bin/activate
 
-APP_MODULE="${APP_MODULE:-packages.karaoke_forge.web:app}"
+APP_MODULE="${APP_MODULE:-packages.karaoke_forge.guarded_app:app}"
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8790}"
 

@@ -20,12 +20,16 @@ from .config import (
     SONGS_DIR,
     ensure_library_dirs,
 )
+from .base_path import StripBasePathMiddleware
 from .review_proxy import router as review_router
 from .runner import run_job
 from .store import Job, create_job, get_job, init_db, list_jobs
 
 app = FastAPI(title="Karaoke Forge", version="0.1.0")
 app.include_router(review_router)
+
+if PUBLIC_BASE_PATH:
+    app.add_middleware(StripBasePathMiddleware, base_path=PUBLIC_BASE_PATH)
 
 
 def public_url(path: str = "/") -> str:

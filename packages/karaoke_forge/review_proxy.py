@@ -8,6 +8,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from .config import DEFAULT_INSTRUMENTAL_SELECTION, PUBLIC_BASE_PATH
+from .review_contract import review_payload_summary, segments_preview_texts, segments_text_digest
+from .review_gate import mark_review_complete
 
 router = APIRouter()
 
@@ -447,6 +449,7 @@ HTML_TEMPLATE = """<!doctype html>
     const deleteAfterCanonicalButton = document.getElementById("delete-after-canonical");
     let lastReady = null;
     let completionRequested = false;
+    let removedSegmentIndexes = [];
 
     function escapeHtml(value) {
       return String(value ?? "").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[ch]));
@@ -471,30 +474,95 @@ HTML_TEMPLATE = """<!doctype html>
       const n = Number(value);
       return Number.isFinite(n) ? n : null;
     }
-    function formatTimestamp(value) {
+    function splitTimestamp(value) {
       const total = secondsValue(value);
-      if (total === null) return value ?? "";
+      if (total === null) return { min: "", sec: "", ms: "" };
       const minutes = Math.floor(total / 60);
       const seconds = total - minutes * 60;
-      return `${minutes}:${seconds.toFixed(3).padStart(6, "0")}`;
+      const wholeSec = Math.floor(seconds);
+      const ms = Math.round((seconds - wholeSec) * 1000);
+      return { min: String(minutes), sec: String(wholeSec), ms: String(ms).padStart(3, "0") };
+    }
+    function timePartsToSeconds(min, sec, ms) {
+      const minutes = Number(min) || 0;
+      const seconds = Number(sec) || 0;
+      const millis = Number(ms) || 0;
+      return roundSeconds(minutes * 60 + seconds + millis / 1000);
+    }
+    function roundSeconds(value) {
+      return Math.round(value * 1000) / 1000;
+    }
+    function formatDuration(start, end) {
+      const delta = roundSeconds(end - start);
+      if (!Number.isFinite(delta)) return "—";
+      return `${delta.toFixed(3)}s`;
+    }
+    function readRowTimes(row) {
+      const start = timePartsToSeconds(
+        row.querySelector("[data-field='start_min']")?.value,
+        row.querySelector("[data-field='start_sec']")?.value,
+        row.querySelector("[data-field='start_ms']")?.value,
+      );
+      const end = timePartsToSeconds(
+        row.querySelector("[data-field='end_min']")?.value,
+        row.querySelector("[data-field='end_sec']")?.value,
+        row.querySelector("[data-field='end_ms']")?.value,
+      );
+      return { start, end };
+    }
+    function renderTimeFields(side, seconds) {
+      const parts = splitTimestamp(seconds);
+      return `<span class="time-group"><input class="time-part" data-field="${side}_min" inputmode="numeric" value="${escapeHtml(parts.min)}" aria-label="${side} minutes" /><span>:</span><input class="time-part" data-field="${side}_sec" inputmode="numeric" value="${escapeHtml(parts.sec)}" aria-label="${side} seconds" /><span>.</span><input class="time-part" data-field="${side}_ms" inputmode="numeric" value="${escapeHtml(parts.ms)}" aria-label="${side} milliseconds" /></span>`;
+    }
+    function rowIsDirty(row) {
+      const textEl = row.querySelector("textarea[data-field='text']");
+      const { start, end } = readRowTimes(row);
+      const originalStart = Number(textEl?.dataset.originalStart || 0);
+      const originalEnd = Number(textEl?.dataset.originalEnd || 0);
+      const textChanged = (textEl?.value.trim() || "") !== (textEl?.dataset.originalValue || "");
+      const startChanged = roundSeconds(start) !== roundSeconds(originalStart);
+      const endChanged = roundSeconds(end) !== roundSeconds(originalEnd);
+      const deleteEl = row.querySelector("input[data-field='delete']");
+      return Boolean(deleteEl?.checked || textChanged || startChanged || endChanged || row.classList.contains("lyrics-applied"));
+    }
+    function refreshRowState(row) {
+      const dirty = rowIsDirty(row);
+      row.classList.toggle("row-dirty", dirty);
+      const badge = row.querySelector(".dirty-badge");
+      if (badge) badge.textContent = dirty ? "edited" : "clean";
+      const durationEl = row.querySelector(".duration-cell");
+      if (durationEl) {
+        const { start, end } = readRowTimes(row);
+        durationEl.textContent = formatDuration(start, end);
+      }
+    }
+    function attachRowListeners(row) {
+      row.querySelectorAll("input, textarea").forEach(el => el.addEventListener("input", () => refreshRowState(row)));
+      refreshRowState(row);
     }
     function collectSegmentEdits() {
-      return Array.from(document.querySelectorAll("tr[data-segment-index]")).map(row => {
+      const edits = Array.from(document.querySelectorAll("tr[data-segment-index]")).map(row => {
         const textEl = row.querySelector("textarea[data-field='text']");
-        const startEl = row.querySelector("input[data-field='start']");
-        const endEl = row.querySelector("input[data-field='end']");
         const deleteEl = row.querySelector("input[data-field='delete']");
+        const { start, end } = readRowTimes(row);
         return {
           index: Number(row.dataset.segmentIndex),
           delete: Boolean(deleteEl && deleteEl.checked),
           original_text: textEl?.dataset.originalValue || "",
           text: textEl?.value.trim() || "",
-          original_start: startEl?.dataset.originalValue || "",
-          start: startEl?.value.trim() || "",
-          original_end: endEl?.dataset.originalValue || "",
-          end: endEl?.value.trim() || "",
+          original_start: textEl?.dataset.originalStart || "",
+          original_end: textEl?.dataset.originalEnd || "",
+          start: String(start),
+          end: String(end),
         };
-      }).filter(edit => edit.delete || edit.text !== edit.original_text || edit.start !== edit.original_start || edit.end !== edit.original_end);
+      });
+      const coveredDeletes = new Set(edits.filter(edit => edit.delete).map(edit => edit.index));
+      for (const idx of removedSegmentIndexes) {
+        if (!coveredDeletes.has(idx)) {
+          edits.push({ index: idx, delete: true, original_text: "", text: "", original_start: "", original_end: "", start: "", end: "" });
+        }
+      }
+      return edits.filter(edit => edit.delete || edit.text !== edit.original_text || String(edit.start) !== String(edit.original_start) || String(edit.end) !== String(edit.original_end));
     }
     function setRowTextFromCanonical(row, canonicalLines) {
       const idx = Number(row.dataset.segmentIndex);
@@ -504,6 +572,7 @@ HTML_TEMPLATE = """<!doctype html>
       if (!textEl) return false;
       textEl.value = canonicalLine;
       row.classList.add("lyrics-applied");
+      refreshRowState(row);
       return true;
     }
     function applyCanonicalLyricsByLineOrder() {
@@ -515,23 +584,21 @@ HTML_TEMPLATE = """<!doctype html>
         if (idx >= canonicalLines.length) return;
         if (setRowTextFromCanonical(row, canonicalLines)) applied += 1;
       });
-      setStatus(`applied ${applied} canonical lyric line(s); extras are not touched`, "done");
+      setStatus(`applied ${applied} canonical lyric line(s); timings preserved`, "done");
     }
     function removeRowsAfterFinalCanonicalLyric() {
       persistCanonicalLyrics();
       const canonicalLines = parseCanonicalLines();
-      let marked = 0;
+      const removedIndexes = [];
       document.querySelectorAll("tr[data-segment-index]").forEach(row => {
-        const idx = Number(row.datasetSegmentIndex || row.dataset.segmentIndex);
-        const deleteEl = row.querySelector("input[data-field='delete']");
-        if (!deleteEl) return;
+        const idx = Number(row.dataset.segmentIndex);
         if (idx >= canonicalLines.length) {
-          deleteEl.checked = true;
-          row.classList.add("marked-delete");
-          marked += 1;
+          removedIndexes.push(idx);
+          row.remove();
         }
       });
-      setStatus(`marked ${marked} tail row(s) for deletion after canonical line ${canonicalLines.length}`, "done");
+      removedSegmentIndexes = Array.from(new Set([...removedSegmentIndexes, ...removedIndexes])).sort((a, b) => a - b);
+      setStatus(`removed ${removedIndexes.length} tail row(s) after canonical line ${canonicalLines.length}; indexes ${removedIndexes.join(", ") || "none"}`, "done");
     }
     function reloadFrame(reason) {
       const base = frame.dataset.src;
@@ -546,18 +613,20 @@ HTML_TEMPLATE = """<!doctype html>
       const instrumentals = payload.instrumental_options || [];
       const meta = payload.metadata || {};
       const debug = payload.review_debug || {};
+      const originalTexts = payload.original_segment_texts || [];
       const title = [meta.artist, meta.title].filter(Boolean).join(" — ") || "Current review session";
       const canonicalLines = parseCanonicalLines();
       const rows = segments.length
         ? segments.map((seg, idx) => {
             const text = segmentText(seg);
+            const originalText = originalTexts[idx] || segmentText(payload.original_segments?.[idx] || {});
             const canonicalLine = canonicalLines[idx] || "";
             const mismatch = canonicalLine && canonicalLine.trim() !== text.trim();
-            const start = formatTimestamp(seg.start ?? seg.start_time ?? "");
-            const end = formatTimestamp(seg.end ?? seg.end_time ?? "");
-            return `<tr data-segment-index="${idx}" class="${mismatch ? "lyric-mismatch" : ""}"><td>${idx + 1}</td><td><input class="time-edit" data-field="start" data-original-value="${escapeHtml(start)}" value="${escapeHtml(start)}" /></td><td><input class="time-edit" data-field="end" data-original-value="${escapeHtml(end)}" value="${escapeHtml(end)}" /></td><td><textarea class="segment-edit" data-field="text" data-original-value="${escapeHtml(text)}" rows="2">${escapeHtml(text)}</textarea></td><td>${canonicalLine ? `<div class="pasted-line">${escapeHtml(canonicalLine)}</div><button type="button" data-use-canonical="${idx}">Use canonical</button>` : `<span class="muted">no canonical line</span>`}</td><td><label><input type="checkbox" data-field="delete" /> delete</label></td></tr>`;
+            const startSeconds = secondsValue(seg.start ?? seg.start_time ?? 0) ?? 0;
+            const endSeconds = secondsValue(seg.end ?? seg.end_time ?? 0) ?? 0;
+            return `<tr data-segment-index="${idx}" class="${mismatch ? "lyric-mismatch" : ""}"><td class="row-index">${idx + 1}</td><td>${renderTimeFields("start", startSeconds)}</td><td>${renderTimeFields("end", endSeconds)}</td><td class="duration-cell">${escapeHtml(formatDuration(startSeconds, endSeconds))}</td><td class="original-text">${escapeHtml(originalText || "—")}</td><td><textarea class="segment-edit" data-field="text" data-original-value="${escapeHtml(text)}" data-original-start="${startSeconds}" data-original-end="${endSeconds}" rows="2">${escapeHtml(text)}</textarea></td><td>${canonicalLine ? `<div class="pasted-line">${escapeHtml(canonicalLine)}</div><button type="button" data-use-canonical="${idx}">Use canonical</button>` : `<span class="muted">no canonical line</span>`}</td><td><span class="dirty-badge">clean</span></td><td><button type="button" class="row-delete" data-delete-row="${idx}">Remove</button></td></tr>`;
           }).join("")
-        : `<tr><td colspan="6">No corrected_segments list found in correction payload. Use the contract debug drawer.</td></tr>`;
+        : `<tr><td colspan="9">No corrected_segments list found in correction payload. Use the contract debug drawer.</td></tr>`;
       const defaultSelection = document.getElementById("default-instrumental").textContent || "clean";
       const inst = instrumentals.length
         ? `<fieldset><legend>Instrumental selection</legend>${instrumentals.map((opt, idx) => {
@@ -568,16 +637,19 @@ HTML_TEMPLATE = """<!doctype html>
         : `<p class="muted">No instrumental options found in payload; defaulting to <code>${escapeHtml(defaultSelection)}</code>.</p>`;
       nativeEl.innerHTML = `
         <h2>${escapeHtml(title)}</h2>
-        <div class="debug-summary"><strong>Contract:</strong> display source <code>${escapeHtml(debug.display_segments_source_key || "none")}</code>, relation <code>${escapeHtml(debug.display_segments_relation || "unknown")}</code>, corrected count <code>${escapeHtml(debug.corrected_segments_count ?? 0)}</code>, display count <code>${escapeHtml(debug.display_segments_count ?? 0)}</code></div>
+        <div class="debug-summary"><strong>Refresh debug:</strong> corrected_segments=<code>${escapeHtml(debug.corrected_segments_count ?? 0)}</code>, top-level segments=<code>${escapeHtml(debug.display_segments_count ?? 0)}</code>, payload keys=<code>${escapeHtml((debug.payload_keys || debug.raw_correction_payload_keys || []).join(", ") || "none")}</code>, review API=<code>${escapeHtml(debug.review_api_upstream || "unknown")}</code></div>
+        <div class="debug-summary"><strong>Contract:</strong> display source <code>${escapeHtml(debug.display_segments_source_key || "none")}</code>, relation <code>${escapeHtml(debug.display_segments_relation || "unknown")}</code></div>
         <h3>Instrumental options</h3>
         ${inst}
         <h3>Lyric segments</h3>
-        <p class="muted">Time fields accept seconds, m:ss, or m:ss.mm. Deletions are applied to the actual <code>corrected_segments</code> array during submit.</p>
-        <table class="review-table"><thead><tr><th>#</th><th>Start</th><th>End</th><th>Final editable text</th><th>Canonical lyric line</th><th>Delete</th></tr></thead><tbody>${rows}</tbody></table>
+        <p class="muted">Edit timings with minutes, seconds, and milliseconds. Finish mutates the upstream <code>corrected_segments</code> array and mirrors it into top-level <code>segments</code>.</p>
+        <table class="review-table"><thead><tr><th>#</th><th>Start (m:s.ms)</th><th>End (m:s.ms)</th><th>Duration</th><th>Original / Whisper</th><th>Corrected lyric</th><th>Canonical preview</th><th>Status</th><th>Remove</th></tr></thead><tbody>${rows}</tbody></table>
       `;
+      document.querySelectorAll("tr[data-segment-index]").forEach(attachRowListeners);
     }
     async function loadNativeData() {
       persistCanonicalLyrics();
+      removedSegmentIndexes = [];
       try {
         const response = await fetch(dataUrl, {cache: "no-store"});
         const payload = await response.json();
@@ -613,7 +685,7 @@ HTML_TEMPLATE = """<!doctype html>
         if (!response.ok || payload.ok === false) throw new Error(JSON.stringify(payload.error || payload));
         completionRequested = true;
         setStatus("review submitted — waiting for karaoke-gen to finalise", "done");
-        nativeEl.insertAdjacentHTML("afterbegin", `<p class="status done">Review accepted with instrumental <code>${escapeHtml(selection)}</code>; corrected_segments ${payload.before_corrected_segments_count} → ${payload.after_corrected_segments_count}; text edits: ${payload.text_edit_count || 0}, timing edits: ${payload.timing_edit_count || 0}, removed indexes: ${(payload.removed_indexes || []).join(", ") || "none"}. Watch the job log for final render.</p>`);
+        nativeEl.insertAdjacentHTML("afterbegin", `<p class="status done">Review accepted with instrumental <code>${escapeHtml(selection)}</code>; corrected_segments ${payload.before_corrected_segments_count} → ${payload.after_corrected_segments_count}; text edits: ${payload.text_edit_count || 0}, timing edits: ${payload.timing_edit_count || 0}, removed indexes: ${(payload.removed_indexes || []).join(", ") || "none"}; outgoing keys: ${(payload.outgoing_payload_top_level_keys || []).join(", ")}. Watch the job log for final render.</p>`);
       } catch (err) {
         nativeEl.insertAdjacentHTML("afterbegin", `<p class="error">Finish failed: ${escapeHtml(err)}</p>`);
       } finally {
@@ -640,10 +712,21 @@ HTML_TEMPLATE = """<!doctype html>
       }
     }
     nativeEl.addEventListener("click", event => {
-      const button = event.target.closest("button[data-use-canonical]");
-      if (!button) return;
-      const row = button.closest("tr[data-segment-index]");
-      if (row && setRowTextFromCanonical(row, parseCanonicalLines())) setStatus("canonical lyric copied into row " + (Number(row.dataset.segmentIndex) + 1), "done");
+      const useCanonical = event.target.closest("button[data-use-canonical]");
+      if (useCanonical) {
+        const row = useCanonical.closest("tr[data-segment-index]");
+        if (row && setRowTextFromCanonical(row, parseCanonicalLines())) setStatus("canonical lyric copied into row " + (Number(row.dataset.segmentIndex) + 1), "done");
+        return;
+      }
+      const deleteButton = event.target.closest("button[data-delete-row]");
+      if (deleteButton) {
+        const row = deleteButton.closest("tr[data-segment-index]");
+        if (!row) return;
+        const idx = Number(row.dataset.segmentIndex);
+        removedSegmentIndexes = Array.from(new Set([...removedSegmentIndexes, idx])).sort((a, b) => a - b);
+        row.remove();
+        setStatus("row " + (idx + 1) + " removed; index " + idx + " will be deleted on finish", "done");
+      }
     });
     canonicalLyricsEl.addEventListener("input", persistCanonicalLyrics);
     reloadButton.addEventListener("click", () => reloadFrame("manual"));
@@ -699,15 +782,31 @@ async def native_review_data() -> JSONResponse:
     if not isinstance(payload, dict):
         return JSONResponse({"ready": False, "error": "correction payload was not an object", "payload_type": type(payload).__name__}, status_code=502)
 
+    summary = review_payload_summary(payload)
+    debug = _review_contract_debug(payload)
+    debug["review_api_upstream"] = REVIEW_UPSTREAM
+    debug["payload_keys"] = summary.get("payload_keys", [])
+
+    if not summary["ready"]:
+        return JSONResponse(
+            {
+                "ready": False,
+                "error": "No corrected_segments rows in upstream correction payload",
+                "review_debug": debug,
+                **summary,
+            },
+            status_code=503,
+        )
+
     display = _find_display_segments(payload)
     display_segments = _extract_segment_dicts(display[0] if display else None)
+    original_segments = _extract_segment_dicts(payload.get("original_segments") if isinstance(payload.get("original_segments"), list) else None)
+
     response_payload = dict(payload)
     response_payload["segments"] = display_segments
-    response_payload["canonical_lyrics_lines"] = []
-    response_payload["canonical_lyrics_source"] = None
-    response_payload["canonical_lyrics_job_id"] = None
-    response_payload["canonical_lyrics_title"] = None
-    response_payload["review_debug"] = _review_contract_debug(payload)
+    response_payload["original_segment_texts"] = [_segment_text(seg) for seg in original_segments]
+    response_payload["ready"] = True
+    response_payload["review_debug"] = debug
     return JSONResponse(response_payload)
 
 
@@ -763,6 +862,24 @@ async def native_complete_review(request: Request, instrumental_selection: str |
                 status_code=502,
             )
 
+        corrected_list = corrected[0] if corrected is not None else []
+        review_completed_debug = {
+            "before_corrected_segments_count": edit_debug["before_corrected_segments_count"],
+            "after_corrected_segments_count": edit_debug["after_corrected_segments_count"],
+            "text_edit_count": edit_debug["text_edit_count"],
+            "timing_edit_count": edit_debug["timing_edit_count"],
+            "removed_indexes": edit_debug["removed_indexes"],
+            "outgoing_payload_top_level_keys": outgoing_payload_top_level_keys,
+        }
+        mark_review_complete(
+            {
+                "review_completed_debug": review_completed_debug,
+                "resolved_corrected_segments_count": len(corrected_list),
+                "resolved_segments_digest": segments_text_digest(corrected_list),
+                "resolved_segments_preview": segments_preview_texts(corrected_list),
+            }
+        )
+
         return JSONResponse(
             {
                 "ok": True,
@@ -770,6 +887,7 @@ async def native_complete_review(request: Request, instrumental_selection: str |
                 "instrumental_selection": selection,
                 "review_debug": _review_contract_debug(payload),
                 "outgoing_payload_top_level_keys": outgoing_payload_top_level_keys,
+                "review_completed_debug": review_completed_debug,
                 "applied_segment_edits": {
                     "text": edit_debug["text_edit_count"],
                     "timing": edit_debug["timing_edit_count"],

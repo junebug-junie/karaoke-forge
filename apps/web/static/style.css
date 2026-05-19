@@ -288,6 +288,40 @@ code {
   padding: 8px;
 }
 
+.time-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  white-space: nowrap;
+}
+
+.time-group .time-part {
+  width: 3.2rem;
+  padding: 6px 4px;
+  text-align: center;
+}
+
+.review-table .original-text {
+  color: #cfc5d8;
+  max-width: 220px;
+}
+
+.row-dirty {
+  background: rgba(240, 213, 107, 0.08);
+}
+
+.dirty-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.row-dirty .dirty-badge {
+  background: rgba(240, 213, 107, 0.18);
+}
+
 .review-table .segment-edit {
   min-height: 54px;
   padding: 8px;

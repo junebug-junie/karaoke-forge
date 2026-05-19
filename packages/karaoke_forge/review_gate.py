@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from .review_contract import review_gate_decision
@@ -7,11 +8,26 @@ from .store import Job, list_jobs, update_job
 
 
 def active_review_job() -> Job | None:
-    for job in list_jobs(limit=20):
-        if job.status in {"queued", "running", "reviewing"}:
-            return job
-    jobs = list_jobs(limit=1)
-    return jobs[0] if jobs else None
+    jobs = list_jobs(limit=50)
+    if not jobs:
+        return None
+
+    priority = {"reviewing": 0, "running": 1, "queued": 2}
+    candidates = [job for job in jobs if job.status in priority]
+    if not candidates:
+        return None
+
+    incomplete = [job for job in candidates if not (job.metadata or {}).get("review_completed_seen")]
+    pool = incomplete or candidates
+
+    def sort_key(job: Job) -> tuple[int, str, str]:
+        return (
+            priority.get(job.status, 9),
+            job.started_at or "",
+            job.updated_at or "",
+        )
+
+    return sorted(pool, key=sort_key)[-1]
 
 
 def mark_review_complete(payload: dict[str, Any] | None = None) -> Job | None:
@@ -19,11 +35,16 @@ def mark_review_complete(payload: dict[str, Any] | None = None) -> Job | None:
     if job is None:
         return None
     metadata = dict(job.metadata or {})
+    completion_payload = payload or {}
     metadata.update(
         {
             "review_completed_seen": True,
             "review_completed_source": "forge_native_complete",
-            "review_completion_payload": payload or {},
+            "review_completed_at": datetime.now(timezone.utc).isoformat(),
+            "review_completed_debug": completion_payload.get("review_completed_debug") or completion_payload,
+            "resolved_corrected_segments_count": completion_payload.get("resolved_corrected_segments_count"),
+            "resolved_segments_digest": completion_payload.get("resolved_segments_digest"),
+            "resolved_segments_preview": completion_payload.get("resolved_segments_preview"),
         }
     )
     status = "reviewing" if job.status == "running" else job.status

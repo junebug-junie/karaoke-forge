@@ -20,6 +20,7 @@ from .config import (
     WHISPER_MODEL_SIZE,
 )
 from .store import Job, update_job
+from .review_contract import review_gate_decision
 
 REVIEW_SERVER_PORT = int(os.getenv("KARAOKE_REVIEW_SERVER_PORT", "8000"))
 VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".webm", ".avi"}
@@ -343,6 +344,37 @@ def run_job(job_id: str) -> Job:
         latest = get_job(job.id)
         metadata = latest.metadata if latest else job.metadata
         render_source_dir = Path(metadata.get("run_dir") or run_dir)
+
+        allowed, gate_error = review_gate_decision(
+            returncode=returncode,
+            review_seen=bool(metadata.get("review_completed_seen")),
+            require_review_payload=True,
+        )
+
+        copied_outputs: list[str] = []
+        render_debug: dict[str, object] = {}
+        if returncode == 0 and not allowed:
+            with log_path.open("a", encoding="utf-8") as log:
+                log.write(
+                    "[renders] karaoke-gen exited before Forge observed review completion; "
+                    "refusing to collect default renders\n"
+                )
+            metadata = {
+                **metadata,
+                "returncode": returncode,
+                "render_outputs": [],
+                "render_source_dir": str(render_source_dir),
+                "review_gate_blocked_render": True,
+                "auto_advance_stdin": AUTO_ADVANCE_STDIN,
+            }
+            return update_job(
+                job.id,
+                status="failed",
+                finished_at=_now(),
+                error=gate_error,
+                metadata=metadata,
+            )
+
         copied_outputs, render_debug = _copy_render_outputs(latest or job, render_source_dir, log_path)
         metadata = {
             **metadata,
