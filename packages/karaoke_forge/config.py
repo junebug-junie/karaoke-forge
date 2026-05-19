@@ -10,6 +10,11 @@ JOBS_DIR = LIBRARY_DIR / "jobs"
 RENDERS_DIR = LIBRARY_DIR / "renders"
 DB_PATH = Path(os.getenv("KARAOKE_FORGE_DB", LIBRARY_DIR / "karaoke_forge.sqlite3")).resolve()
 
+PUBLIC_BASE_PATH = os.getenv("KARAOKE_FORGE_BASE_PATH", "").strip()
+if PUBLIC_BASE_PATH and not PUBLIC_BASE_PATH.startswith("/"):
+    PUBLIC_BASE_PATH = "/" + PUBLIC_BASE_PATH
+PUBLIC_BASE_PATH = PUBLIC_BASE_PATH.rstrip("/")
+
 KARAOKE_GEN_BIN = os.getenv("KARAOKE_GEN_BIN", "karaoke-gen")
 WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "medium")
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cuda")
