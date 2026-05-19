@@ -839,7 +839,7 @@ HTML_TEMPLATE = """<!doctype html>
         <h2>${escapeHtml(title)}</h2>
         <div class="debug-summary"><strong>Refresh debug:</strong> corrected_segments=<code>${escapeHtml(debug.corrected_segments_count ?? 0)}</code>, top-level segments=<code>${escapeHtml(debug.display_segments_count ?? 0)}</code>, payload keys=<code>${escapeHtml((debug.payload_keys || debug.raw_correction_payload_keys || []).join(", ") || "none")}</code>, review API=<code>${escapeHtml(debug.review_api_upstream || "unknown")}</code></div>
         <div class="debug-summary"><strong>Contract:</strong> display source <code>${escapeHtml(debug.display_segments_source_key || "none")}</code>, relation <code>${escapeHtml(debug.display_segments_relation || "unknown")}</code></div>
-        <div class="debug-summary"><strong>Canonical lyrics:</strong> <code>${escapeHtml(canonicalLines.length)}</code> line(s) from <code>${escapeHtml(canonicalSource)}</code></div>
+        <div class="debug-summary"><strong>Canonical lyrics:</strong> <code>${escapeHtml(effectiveCanonicalLines().length)}</code> line(s) from <code>${escapeHtml(canonicalSource)}</code></div>
         ${tailJunkCount ? `<p class="status queued"><code>${tailJunkCount}</code> outro junk row(s) detected after the last matched lyric; use <strong>Remove outro junk rows</strong> or Finish will drop them.</p>` : ""}
         <h3>Instrumental options</h3>
         ${inst}
