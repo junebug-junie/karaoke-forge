@@ -14,7 +14,8 @@ dependencies = [
 
 [project.optional-dependencies]
 generator = [
-  "karaoke-gen[local-whisper]"
+  "karaoke-gen[local-whisper]",
+  "whisper-timestamped"
 ]
 dev = [
   "pytest>=8.0.0"
