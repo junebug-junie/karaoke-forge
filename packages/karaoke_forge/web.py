@@ -4,6 +4,7 @@ import html
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
@@ -79,6 +80,7 @@ def trace_text(text: str) -> str:
         "Karaoke finalisation complete",
         "Final Videos",
         "Final Videos:",
+        "[renders]",
     )
     lines = text.splitlines()
     selected: list[str] = []
@@ -93,6 +95,136 @@ def trace_text(text: str) -> str:
     if not selected:
         return tail_text(text, 160)
     return "\n".join(selected[-500:]) + "\n"
+
+
+def format_file_size(size_bytes: int | None) -> str:
+    if size_bytes is None:
+        return "unknown"
+    units = ("B", "KB", "MB", "GB", "TB")
+    value = float(size_bytes)
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{size_bytes} B"
+
+
+def format_file_timestamp(path: Path) -> str:
+    try:
+        stat = path.stat()
+    except OSError:
+        return "missing"
+    return datetime.fromtimestamp(stat.st_mtime, timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def render_discovery(job: Job) -> dict[str, Any]:
+    if not job.metadata:
+        return {}
+    value = job.metadata.get("render_discovery")
+    return value if isinstance(value, dict) else {}
+
+
+def render_source_path(job: Job, copied_path: str, idx: int) -> str:
+    discovery = render_discovery(job)
+    copied_paths = discovery.get("copied_paths")
+    selected_paths = discovery.get("selected_paths")
+
+    if isinstance(copied_paths, list) and isinstance(selected_paths, list):
+        try:
+            matching_idx = copied_paths.index(copied_path)
+        except ValueError:
+            matching_idx = idx
+        if 0 <= matching_idx < len(selected_paths):
+            return str(selected_paths[matching_idx])
+
+    if isinstance(selected_paths, list) and 0 <= idx < len(selected_paths):
+        return str(selected_paths[idx])
+
+    return str(job.metadata.get("render_source_dir") or job.output_dir)
+
+
+def render_meta_for_path(job: Job, path_text: str, idx: int) -> dict[str, object]:
+    path = Path(path_text)
+    exists = path.exists()
+    stat = path.stat() if exists else None
+    return {
+        "idx": idx,
+        "name": path.name or f"render-{idx + 1}",
+        "copied_path": str(path),
+        "source_path": render_source_path(job, path_text, idx),
+        "timestamp": format_file_timestamp(path),
+        "size": format_file_size(stat.st_size if stat else None),
+        "exists": exists,
+        "url": public_url("/jobs/" + job.id + "/render/" + str(idx)),
+    }
+
+
+def render_cards(job: Job, *, compact: bool = False) -> str:
+    renders = job.metadata.get("render_outputs", []) if job.metadata else []
+    if not renders:
+        return "<p class='muted'>No copied renders yet.</p>"
+
+    discovery = render_discovery(job)
+    discovery_bits = []
+    if discovery:
+        discovery_bits = [
+            f"source={esc(discovery.get('discovery_source', 'unknown'))}",
+            f"candidates={esc(discovery.get('candidate_count', 'unknown'))}",
+            f"selected={esc(discovery.get('selected_count', len(renders)))}",
+        ]
+
+    cards: list[str] = []
+    for idx, path_text in enumerate(renders):
+        meta = render_meta_for_path(job, str(path_text), idx)
+        missing = "" if meta["exists"] else " render-missing"
+        if compact:
+            cards.append(
+                f"""
+<a class="render-pill{missing}" href="{esc(meta['url'])}">
+  <span>{esc(meta['name'])}</span>
+  <small>{esc(meta['timestamp'])}</small>
+</a>
+"""
+            )
+            continue
+
+        cards.append(
+            f"""
+<article class="render-card{missing}">
+  <div class="render-card-header">
+    <div>
+      <strong>Render {idx + 1}</strong>
+      <a href="{esc(meta['url'])}">{esc(meta['name'])}</a>
+    </div>
+    <span class="status {'done' if meta['exists'] else 'failed'}">{'ready' if meta['exists'] else 'missing'}</span>
+  </div>
+  <dl class="render-meta">
+    <dt>Filename</dt><dd><code>{esc(meta['name'])}</code></dd>
+    <dt>Copied location</dt><dd><code>{esc(meta['copied_path'])}</code></dd>
+    <dt>Source location</dt><dd><code>{esc(meta['source_path'])}</code></dd>
+    <dt>Timestamp</dt><dd>{esc(meta['timestamp'])}</dd>
+    <dt>Size</dt><dd>{esc(meta['size'])}</dd>
+  </dl>
+</article>
+"""
+        )
+
+    debug = ""
+    if discovery_bits and not compact:
+        debug = f"<p class='muted render-discovery'>{' · '.join(discovery_bits)}</p>"
+
+    return debug + "\n".join(cards)
+
+
+def latest_render_summary(job: Job) -> str:
+    renders = job.metadata.get("render_outputs", []) if job.metadata else []
+    if not renders:
+        return "<span class='muted'>No render copied yet.</span>"
+    meta = render_meta_for_path(job, str(renders[0]), 0)
+    return (
+        f"<a href='{esc(meta['url'])}'>{esc(meta['name'])}</a>"
+        f"<br><small class='muted'>{esc(meta['timestamp'])} · {esc(meta['size'])}</small>"
+    )
 
 
 def page(title: str, body: str) -> HTMLResponse:
@@ -204,6 +336,7 @@ def latest_job_block(job: Job) -> str:
     <dt>Output directory</dt><dd><code>{esc(job.output_dir)}</code></dd>
     <dt>Current run log</dt><dd><code>{esc(job.log_path)}</code></dd>
     <dt>Copied renders</dt><dd>{render_count}</dd>
+    <dt>Latest render</dt><dd>{latest_render_summary(job)}</dd>
   </dl>
 </div>
 """
@@ -211,10 +344,7 @@ def latest_job_block(job: Job) -> str:
 
 def job_row(job: Job) -> str:
     renders = job.metadata.get("render_outputs", []) if job.metadata else []
-    render_links = "".join(
-        f"<a href='{esc(public_url('/jobs/' + job.id + '/render/' + str(idx)))}'>render {idx + 1}</a> "
-        for idx, _ in enumerate(renders)
-    )
+    render_links = render_cards(job, compact=True) if renders else "<span class='muted'>no render</span>"
 
     error = f"<p class='error'>{esc(job.error)}</p>" if job.error else ""
     job_url = esc(public_url("/jobs/" + job.id))
@@ -231,7 +361,7 @@ def job_row(job: Job) -> str:
   <div class="actions">
     <a href="{job_url}">details</a>
     <a href="{log_url}">live log</a>
-    {render_links}
+    <div class="render-pills">{render_links}</div>
   </div>
 </article>
 """
@@ -289,11 +419,7 @@ def job_detail(job_id: str) -> HTMLResponse:
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    renders = job.metadata.get("render_outputs", []) if job.metadata else []
-    render_links = "".join(
-        f"<li><a href='{esc(public_url('/jobs/' + job.id + '/render/' + str(idx)))}'>{esc(Path(path).name)}</a></li>"
-        for idx, path in enumerate(renders)
-    ) or "<li>No copied renders yet.</li>"
+    render_cards_html = render_cards(job)
 
     raw_log_url = esc(public_url('/jobs/' + job.id + '/log/raw'))
     live_log_url = esc(public_url('/jobs/' + job.id + '/log/text'))
@@ -323,6 +449,9 @@ def job_detail(job_id: str) -> HTMLResponse:
     <dt>Output directory</dt><dd><code>{esc(job.output_dir)}</code></dd>
     <dt>Current run log</dt><dd><code>{esc(job.log_path)}</code></dd>
   </dl>
+
+  <h2>Renders</h2>
+  <div class="render-list">{render_cards_html}</div>
 
   <h2>Live run log</h2>
   <div class="button-row">
@@ -369,9 +498,6 @@ def job_detail(job_id: str) -> HTMLResponse:
     refreshLog();
     setInterval(refreshLog, 2000);
   </script>
-
-  <h2>Renders</h2>
-  <ul>{render_links}</ul>
 </section>
 """
     return page("Job", body)
