@@ -46,9 +46,13 @@ if PUBLIC_BASE_PATH and not PUBLIC_BASE_PATH.startswith("/"):
 PUBLIC_BASE_PATH = PUBLIC_BASE_PATH.rstrip("/")
 
 KARAOKE_GEN_BIN = os.getenv("KARAOKE_GEN_BIN", "karaoke-gen")
-WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "medium")
+
+# whisper-timestamped uses the OpenAI Whisper loader, so the supported name is
+# large-v3, not the Hugging Face identifier openai/whisper-large-v3.
+WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "large-v3")
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cuda")
 ENABLE_LOCAL_WHISPER = os.getenv("ENABLE_LOCAL_WHISPER", "true")
+SPACY_MODEL = os.getenv("SPACY_MODEL", "en_core_web_md")
 
 # Indie-karaoke-safe defaults. Clean instrumental avoids unstable lead-vocal
 # leakage from backing-vocal stems, and +300ms compensates for highlights that
