@@ -8,7 +8,16 @@ from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadF
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from .config import JOBS_DIR, PUBLIC_BASE_PATH, RENDERS_DIR, SONGS_DIR, ensure_library_dirs
+from .config import (
+    DB_PATH,
+    JOBS_DIR,
+    LIBRARY_DIR,
+    PUBLIC_BASE_PATH,
+    RENDERS_DIR,
+    ROOT_DIR,
+    SONGS_DIR,
+    ensure_library_dirs,
+)
 from .review_proxy import router as review_router
 from .runner import run_job
 from .store import Job, create_job, get_job, init_db, list_jobs
@@ -75,11 +84,32 @@ def startup() -> None:
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
     jobs = list_jobs(limit=50)
-    rows = "".join(job_row(job) for job in jobs) or "<p>No jobs yet. Upload one cursed indie banger.</p>"
+    latest = jobs[0] if jobs else None
+    latest_block = latest_job_block(latest) if latest else "<p>No jobs yet. Upload one cursed indie banger.</p>"
+    rows = "".join(job_row(job) for job in jobs) or "<p>No jobs yet.</p>"
 
     body = f"""
+<section class="panel status-panel">
+  <h1>Karaoke Forge</h1>
+  <p class="muted">Private indie karaoke factory running from Atlas.</p>
+  <div class="path-grid">
+    <div><strong>Public base</strong><code>{esc(PUBLIC_BASE_PATH or '/')}</code></div>
+    <div><strong>Repo root</strong><code>{esc(ROOT_DIR)}</code></div>
+    <div><strong>Library</strong><code>{esc(LIBRARY_DIR)}</code></div>
+    <div><strong>Songs</strong><code>{esc(SONGS_DIR)}</code></div>
+    <div><strong>Jobs</strong><code>{esc(JOBS_DIR)}</code></div>
+    <div><strong>Renders</strong><code>{esc(RENDERS_DIR)}</code></div>
+    <div><strong>SQLite DB</strong><code>{esc(DB_PATH)}</code></div>
+  </div>
+</section>
+
+<section class="panel latest-panel">
+  <h2>Latest job</h2>
+  {latest_block}
+</section>
+
 <section class="panel">
-  <h1>Make a karaoke video</h1>
+  <h2>Make a karaoke video</h2>
   <form method="post" action="{esc(public_url('/jobs'))}" enctype="multipart/form-data">
     <label>Artist <input name="artist" required placeholder="The Wrens" /></label>
     <label>Title <input name="title" required placeholder="Happy" /></label>
@@ -92,11 +122,37 @@ def index() -> HTMLResponse:
 </section>
 
 <section class="panel">
-  <h2>Jobs</h2>
+  <h2>All jobs</h2>
   <div class="jobs">{rows}</div>
 </section>
 """
     return page("Home", body)
+
+
+def latest_job_block(job: Job) -> str:
+    job_url = esc(public_url("/jobs/" + job.id))
+    log_url = esc(public_url("/jobs/" + job.id + "/log"))
+    review_url = esc(public_url("/review"))
+    renders = job.metadata.get("render_outputs", []) if job.metadata else []
+    render_count = len(renders)
+    return f"""
+<div class="latest-job-card">
+  <h3><a href="{job_url}">{esc(job.artist)} — {esc(job.title)}</a></h3>
+  <p><span class="status {esc(job.status)}">{esc(job.status)}</span> updated {esc(job.updated_at)}</p>
+  <div class="button-row">
+    <a class="button-link" href="{job_url}">Details</a>
+    <a class="button-link" href="{log_url}">Log</a>
+    <a class="button-link" href="{review_url}">Review</a>
+  </div>
+  <dl>
+    <dt>Job directory</dt><dd><code>{esc(job.job_dir)}</code></dd>
+    <dt>Source audio</dt><dd><code>{esc(job.source_audio_path)}</code></dd>
+    <dt>Output directory</dt><dd><code>{esc(job.output_dir)}</code></dd>
+    <dt>Log path</dt><dd><code>{esc(job.log_path)}</code></dd>
+    <dt>Copied renders</dt><dd>{render_count}</dd>
+  </dl>
+</div>
+"""
 
 
 def job_row(job: Job) -> str:
@@ -115,9 +171,11 @@ def job_row(job: Job) -> str:
   <div>
     <h3><a href="{job_url}">{esc(job.artist)} — {esc(job.title)}</a></h3>
     <p><span class="status {esc(job.status)}">{esc(job.status)}</span> created {esc(job.created_at)}</p>
+    <p class="muted"><code>{esc(job.job_dir)}</code></p>
     {error}
   </div>
   <div class="actions">
+    <a href="{job_url}">details</a>
     <a href="{log_url}">log</a>
     {render_links}
   </div>
@@ -185,6 +243,7 @@ def job_detail(job_id: str) -> HTMLResponse:
 <section class="panel">
   <h1>{esc(job.artist)} — {esc(job.title)}</h1>
   <p><span class="status {esc(job.status)}">{esc(job.status)}</span></p>
+  <p><a class="button-link" href="{esc(public_url('/review'))}">Open Review tab</a></p>
 
   <dl>
     <dt>Created</dt><dd>{esc(job.created_at)}</dd>
@@ -192,6 +251,11 @@ def job_detail(job_id: str) -> HTMLResponse:
     <dt>Started</dt><dd>{esc(job.started_at)}</dd>
     <dt>Finished</dt><dd>{esc(job.finished_at)}</dd>
     <dt>Error</dt><dd>{esc(job.error)}</dd>
+    <dt>Source audio</dt><dd><code>{esc(job.source_audio_path)}</code></dd>
+    <dt>Lyrics file</dt><dd><code>{esc(job.lyrics_path)}</code></dd>
+    <dt>Job directory</dt><dd><code>{esc(job.job_dir)}</code></dd>
+    <dt>Output directory</dt><dd><code>{esc(job.output_dir)}</code></dd>
+    <dt>Log path</dt><dd><code>{esc(job.log_path)}</code></dd>
   </dl>
 
   <p><a href="{esc(public_url('/jobs/' + job.id + '/log'))}">View log</a></p>
