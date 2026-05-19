@@ -23,24 +23,31 @@ from .store import Job, update_job
 
 PROMPT_DEFAULT_ACCEPTS = "\n" * 40
 REVIEW_SERVER_PORT = int(os.getenv("KARAOKE_REVIEW_SERVER_PORT", "8000"))
+VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".webm", ".avi"}
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _iter_render_candidates(job_dir: Path) -> Iterable[Path]:
+def _iter_render_candidates(source_dir: Path) -> Iterable[Path]:
     for pattern in ("*.mp4", "*.mkv", "*.mov", "*.webm", "*.avi"):
-        yield from job_dir.rglob(pattern)
+        yield from source_dir.rglob(pattern)
 
 
-def _copy_render_outputs(job: Job) -> list[str]:
-    job_dir = Path(job.job_dir)
+def _copy_render_outputs(job: Job, source_dir: Path) -> list[str]:
     output_dir = Path(job.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # The UI-facing render directory is a copy/cache for the current job. Clear
+    # old copied videos before copying this run's outputs so stale attempts do
+    # not appear as fresh final renders.
+    for old in output_dir.iterdir():
+        if old.is_file() and old.suffix.lower() in VIDEO_SUFFIXES:
+            old.unlink()
+
     copied: list[str] = []
-    for candidate in _iter_render_candidates(job_dir):
+    for candidate in _iter_render_candidates(source_dir):
         if output_dir in candidate.parents:
             continue
         target = output_dir / candidate.name
@@ -151,7 +158,9 @@ def run_job(job_id: str) -> Job:
 
     job_dir = Path(job.job_dir)
     log_path = Path(job.log_path)
+    run_dir = Path(job.metadata.get("run_dir") or log_path.parent)
     job_dir.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     cmd = build_karaoke_gen_command(job)
@@ -159,7 +168,7 @@ def run_job(job_id: str) -> Job:
         job.id,
         status="running",
         started_at=_now(),
-        metadata={**job.metadata, "command": cmd, "run_log_path": str(log_path)},
+        metadata={**job.metadata, "command": cmd, "run_log_path": str(log_path), "run_dir": str(run_dir)},
     )
 
     try:
@@ -170,6 +179,7 @@ def run_job(job_id: str) -> Job:
             log.write(f"[models] whisper_model_size={WHISPER_MODEL_SIZE} spacy_model={SPACY_MODEL}\n")
             log.write(f"[defaults] instrumental_selection={DEFAULT_INSTRUMENTAL_SELECTION} subtitle_offset_ms={DEFAULT_SUBTITLE_OFFSET_MS}\n")
             log.write(f"[patch] karaoke_gen_output_config=enabled pythonpath_root={ROOT_DIR}\n")
+            log.write(f"[run-dir] {run_dir}\n")
             killed = kill_stale_review_server(log)
             if killed:
                 log.write(f"[review-port] killed stale pid(s): {killed}\n")
@@ -178,7 +188,7 @@ def run_job(job_id: str) -> Job:
 
             proc = subprocess.run(
                 cmd,
-                cwd=job_dir,
+                cwd=run_dir,
                 env=build_environment(),
                 input=PROMPT_DEFAULT_ACCEPTS,
                 stdout=log,
@@ -190,8 +200,14 @@ def run_job(job_id: str) -> Job:
 
         latest = get_job(job.id)
         metadata = latest.metadata if latest else job.metadata
-        copied_outputs = _copy_render_outputs(latest or job)
-        metadata = {**metadata, "returncode": proc.returncode, "render_outputs": copied_outputs}
+        render_source_dir = Path(metadata.get("run_dir") or run_dir)
+        copied_outputs = _copy_render_outputs(latest or job, render_source_dir)
+        metadata = {
+            **metadata,
+            "returncode": proc.returncode,
+            "render_outputs": copied_outputs,
+            "render_source_dir": str(render_source_dir),
+        }
 
         if proc.returncode != 0:
             return update_job(
