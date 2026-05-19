@@ -274,11 +274,31 @@ def build_environment() -> dict[str, str]:
 
 
 def run_job(job_id: str) -> Job:
+    from .job_lifecycle import claim_active_job, reconcile_orphaned_jobs, release_active_job
     from .store import get_job
 
     job = get_job(job_id)
     if job is None:
         raise KeyError(job_id)
+
+    reconcile_orphaned_jobs()
+    if not claim_active_job(job.id):
+        return update_job(
+            job.id,
+            status="failed",
+            finished_at=_now(),
+            error="Another Forge job is already active",
+            metadata={**(job.metadata or {}), "blocked_by_active_job": True},
+        )
+
+    try:
+        return _run_job_body(job)
+    finally:
+        release_active_job(job.id)
+
+
+def _run_job_body(job: Job) -> Job:
+    from .store import get_job
 
     job_dir = Path(job.job_dir)
     log_path = Path(job.log_path)

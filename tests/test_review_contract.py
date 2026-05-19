@@ -122,6 +122,7 @@ def test_native_complete_persists_review_metadata(client, tmp_path, monkeypatch)
     db_path = tmp_path / "forge.sqlite3"
     monkeypatch.setenv("KARAOKE_FORGE_DB", str(db_path))
     monkeypatch.setenv("KARAOKE_FORGE_LIBRARY", str(tmp_path / "library"))
+    monkeypatch.setattr("packages.karaoke_forge.store.DB_PATH", db_path)
     init_db()
     job = create_job(
         artist="A",
@@ -133,6 +134,11 @@ def test_native_complete_persists_review_metadata(client, tmp_path, monkeypatch)
         log_path=tmp_path / "job.log",
         metadata={"run_dir": str(tmp_path / "run")},
     )
+    update_job(job.id, status="running", started_at="2026-05-19T08:00:00+00:00")
+    from packages.karaoke_forge.job_lifecycle import set_active_job_id
+
+    set_active_job_id(job.id)
+    monkeypatch.setattr("packages.karaoke_forge.job_lifecycle.list_karaoke_gen_processes", lambda: [])
     correction = {
         "corrected_segments": [{"text": "before", "start_time": 1.0, "end_time": 2.0}],
         "original_segments": [{"text": "before"}],
@@ -166,6 +172,8 @@ def test_runner_refuses_renders_without_review_completion(tmp_path, monkeypatch)
     library = tmp_path / "library"
     monkeypatch.setenv("KARAOKE_FORGE_DB", str(db_path))
     monkeypatch.setenv("KARAOKE_FORGE_LIBRARY", str(library))
+    monkeypatch.setattr("packages.karaoke_forge.store.DB_PATH", db_path)
+    monkeypatch.setattr("packages.karaoke_forge.job_lifecycle.list_karaoke_gen_processes", lambda: [])
     init_db()
 
     run_dir = tmp_path / "run"
@@ -234,11 +242,16 @@ def test_active_review_job_prefers_running_without_completion(tmp_path, monkeypa
         job_dir=tmp_path / "running",
         output_dir=tmp_path / "out-r",
         log_path=tmp_path / "running.log",
-        metadata={},
+        metadata={"command": ["karaoke-gen", str(tmp_path / "b.wav"), "Running", "Live"]},
     )
-    from packages.karaoke_forge.review_gate import active_review_job
+    from packages.karaoke_forge.job_lifecycle import active_review_job, set_active_job_id
 
-    update_job(running.id, status="running")
+    update_job(running.id, status="running", started_at="2026-05-19T08:00:00+00:00")
+    set_active_job_id(running.id)
+    monkeypatch.setattr(
+        "packages.karaoke_forge.job_lifecycle.list_karaoke_gen_processes",
+        lambda: [(1, f"karaoke-gen -y {tmp_path / 'b.wav'} Running Live")],
+    )
     selected = active_review_job()
     assert selected is not None
     assert selected.id == running.id
@@ -249,6 +262,8 @@ def test_runner_collects_render_after_review_completion(tmp_path, monkeypatch):
     library = tmp_path / "library"
     monkeypatch.setenv("KARAOKE_FORGE_DB", str(db_path))
     monkeypatch.setenv("KARAOKE_FORGE_LIBRARY", str(library))
+    monkeypatch.setattr("packages.karaoke_forge.store.DB_PATH", db_path)
+    monkeypatch.setattr("packages.karaoke_forge.job_lifecycle.list_karaoke_gen_processes", lambda: [])
     init_db()
 
     run_dir = tmp_path / "run"

@@ -21,6 +21,7 @@ from .config import (
     ensure_library_dirs,
 )
 from .base_path import StripBasePathMiddleware
+from .job_lifecycle import find_blocking_active_job, reconcile_orphaned_jobs
 from .review_proxy import router as review_router
 from .runner import run_job
 from .store import Job, create_job, get_job, init_db, list_jobs
@@ -265,6 +266,9 @@ def page(title: str, body: str) -> HTMLResponse:
 def startup() -> None:
     ensure_library_dirs()
     init_db()
+    reconciled = reconcile_orphaned_jobs()
+    if reconciled:
+        print(f"[startup] reconciled orphaned jobs: {', '.join(job_id[:8] for job_id in reconciled)}")
 
     static_dir = Path(__file__).resolve().parents[2] / "apps" / "web" / "static"
     if static_dir.exists() and "static" not in [route.path.strip("/") for route in app.routes]:
@@ -380,6 +384,10 @@ def submit_job(
     audio: UploadFile = File(...),
 ) -> RedirectResponse:
     ensure_library_dirs()
+    reconcile_orphaned_jobs()
+    blocking = find_blocking_active_job()
+    if blocking is not None:
+        return RedirectResponse(public_url(f"/jobs/{blocking.id}?blocked=active"), status_code=303)
 
     stem = safe_name(f"{artist} - {title}")
     run_id = new_run_id()
@@ -418,12 +426,17 @@ def submit_job(
 
 
 @app.get("/jobs/{job_id}", response_class=HTMLResponse)
-def job_detail(job_id: str) -> HTMLResponse:
+def job_detail(job_id: str, blocked: str | None = None) -> HTMLResponse:
     job = get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
     render_cards_html = render_cards(job)
+    blocked_banner = (
+        "<p class='error'>Another job is already active. Finish or wait for that run before queueing a new one.</p>"
+        if blocked == "active"
+        else ""
+    )
 
     raw_log_url = esc(public_url('/jobs/' + job.id + '/log/raw'))
     live_log_url = esc(public_url('/jobs/' + job.id + '/log/text'))
@@ -433,6 +446,7 @@ def job_detail(job_id: str) -> HTMLResponse:
 <section class="panel">
   <h1>{esc(job.artist)} — {esc(job.title)}</h1>
   <p><span class="status {esc(job.status)}">{esc(job.status)}</span></p>
+  {blocked_banner}
   <p>
     <a class="button-link" href="{esc(public_url('/review'))}">Open Review tab</a>
     <a class="button-link" href="{raw_log_url}">Raw run log</a>

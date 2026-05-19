@@ -8,6 +8,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from .config import DEFAULT_INSTRUMENTAL_SELECTION, PUBLIC_BASE_PATH
+from .job_lifecycle import get_active_job_id
 from .review_contract import review_payload_summary, segments_preview_texts, segments_text_digest
 from .review_gate import mark_review_complete
 
@@ -786,6 +787,7 @@ async def native_review_data() -> JSONResponse:
     debug = _review_contract_debug(payload)
     debug["review_api_upstream"] = REVIEW_UPSTREAM
     debug["payload_keys"] = summary.get("payload_keys", [])
+    debug["active_job_id"] = get_active_job_id()
 
     if not summary["ready"]:
         return JSONResponse(

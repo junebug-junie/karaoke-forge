@@ -3,31 +3,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from .job_lifecycle import active_review_job
 from .review_contract import review_gate_decision
-from .store import Job, list_jobs, update_job
-
-
-def active_review_job() -> Job | None:
-    jobs = list_jobs(limit=50)
-    if not jobs:
-        return None
-
-    priority = {"reviewing": 0, "running": 1, "queued": 2}
-    candidates = [job for job in jobs if job.status in priority]
-    if not candidates:
-        return None
-
-    incomplete = [job for job in candidates if not (job.metadata or {}).get("review_completed_seen")]
-    pool = incomplete or candidates
-
-    def sort_key(job: Job) -> tuple[int, str, str]:
-        return (
-            priority.get(job.status, 9),
-            job.started_at or "",
-            job.updated_at or "",
-        )
-
-    return sorted(pool, key=sort_key)[-1]
+from .store import Job, update_job
 
 
 def mark_review_complete(payload: dict[str, Any] | None = None) -> Job | None:
