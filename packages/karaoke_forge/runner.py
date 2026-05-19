@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-from datetime import timezone, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -14,6 +14,8 @@ from .config import (
     WHISPER_MODEL_SIZE,
 )
 from .store import Job, update_job
+
+PROMPT_DEFAULT_ACCEPTS = "\n" * 40
 
 
 def _now() -> str:
@@ -92,6 +94,7 @@ def run_job(job_id: str) -> Job:
                 cmd,
                 cwd=job_dir,
                 env=build_environment(),
+                input=PROMPT_DEFAULT_ACCEPTS,
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 text=True,
