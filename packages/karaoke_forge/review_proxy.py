@@ -22,6 +22,10 @@ HOP_BY_HOP_HEADERS = {
     "transfer-encoding",
     "upgrade",
 }
+STRIP_RESPONSE_HEADERS = HOP_BY_HOP_HEADERS | {
+    "content-length",
+    "content-encoding",
+}
 ABSOLUTE_REVIEW_PREFIXES = (
     "/_next/",
     "/api/",
@@ -34,6 +38,7 @@ ABSOLUTE_REVIEW_PREFIXES = (
     "/media/",
     "/static/",
 )
+LOCALE_PREFIXES = ("/en/", "/es/", "/de/", "/fr/", "/it/", "/ja/", "/ko/", "/pt/", "/zh/")
 
 
 def public_url(path: str = "/") -> str:
@@ -78,7 +83,7 @@ def rewrite_body(content: bytes, content_type: str) -> bytes:
     # Next.js client bundles often call fetch('/api/...') or refer to absolute
     # '/_next/...' paths from JavaScript. Those do not appear as href/src attrs,
     # so rewrite common quoted absolute route prefixes too.
-    for absolute_prefix in ABSOLUTE_REVIEW_PREFIXES:
+    for absolute_prefix in ABSOLUTE_REVIEW_PREFIXES + LOCALE_PREFIXES:
         proxied_prefix = prefix + absolute_prefix
         for quote in ('"', "'", "`"):
             text = text.replace(f"{quote}{absolute_prefix}", f"{quote}{proxied_prefix}")
@@ -90,6 +95,7 @@ def rewrite_body(content: bytes, content_type: str) -> bytes:
 def review_tab() -> HTMLResponse:
     iframe_src = html.escape(proxy_url(REVIEW_PATH))
     status_url = html.escape(public_url("/review/status"))
+    direct_url = html.escape(proxy_url(REVIEW_PATH))
     home_url = html.escape(public_url("/"))
     review_url = html.escape(public_url("/review"))
     css_url = html.escape(public_url("/static/style.css"))
@@ -119,6 +125,7 @@ def review_tab() -> HTMLResponse:
       <div class="button-row">
         <span id="review-status" class="status queued">checking review server...</span>
         <button type="button" id="review-reload">Reload review frame</button>
+        <a class="button-link" href="{direct_url}" target="_blank" rel="noreferrer">Open proxied review directly</a>
       </div>
       <iframe id="review-frame" class="review-frame" data-src="{iframe_src}" src="{iframe_src}"></iframe>
     </section>
@@ -178,7 +185,10 @@ def review_tab() -> HTMLResponse:
 async def review_status() -> JSONResponse:
     try:
         async with httpx.AsyncClient(follow_redirects=False, timeout=1.5) as client:
-            response = await client.get(REVIEW_UPSTREAM + REVIEW_PATH)
+            response = await client.get(
+                REVIEW_UPSTREAM + REVIEW_PATH,
+                headers={"accept-encoding": "identity"},
+            )
     except httpx.HTTPError as exc:
         return JSONResponse({"ready": False, "error": str(exc), "review_url": proxy_url(REVIEW_PATH)})
 
@@ -202,6 +212,7 @@ async def review_proxy(path: str, request: Request) -> Response:
         for key, value in request.headers.items()
         if key.lower() not in HOP_BY_HOP_HEADERS and key.lower() != "host"
     }
+    headers["accept-encoding"] = "identity"
 
     try:
         async with httpx.AsyncClient(follow_redirects=False, timeout=120.0) as client:
@@ -228,7 +239,7 @@ async def review_proxy(path: str, request: Request) -> Response:
     response_headers = {
         key: value
         for key, value in upstream.headers.items()
-        if key.lower() not in HOP_BY_HOP_HEADERS and key.lower() != "content-length"
+        if key.lower() not in STRIP_RESPONSE_HEADERS
     }
 
     location = response_headers.get("location")
