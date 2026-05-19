@@ -95,7 +95,7 @@ button {
 }
 
 .actions {
-  min-width: 160px;
+  min-width: 220px;
   text-align: right;
 }
 
@@ -124,6 +124,10 @@ dl {
 dt { color: #cfc5d8; font-weight: 800; }
 dd { margin: 0; }
 
+code {
+  overflow-wrap: anywhere;
+}
+
 .tabs {
   display: flex;
   gap: 10px;
@@ -141,6 +145,80 @@ dd { margin: 0; }
 
 .muted {
   color: #cfc5d8;
+}
+
+.render-list {
+  display: grid;
+  gap: 14px;
+  margin: 12px 0 28px;
+}
+
+.render-card {
+  border: 1px solid rgba(240, 213, 107, 0.24);
+  border-radius: 18px;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.render-card-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+
+.render-card-header strong {
+  display: block;
+  color: #fff;
+  margin-bottom: 4px;
+}
+
+.render-meta {
+  grid-template-columns: 150px 1fr;
+  font-size: 0.92rem;
+}
+
+.render-meta dd {
+  min-width: 0;
+}
+
+.render-discovery {
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  display: inline-block;
+}
+
+.render-pills {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.render-pill {
+  display: grid;
+  gap: 2px;
+  text-align: right;
+  text-decoration: none;
+  border-radius: 12px;
+  padding: 8px 10px;
+  background: rgba(240, 213, 107, 0.11);
+  border: 1px solid rgba(240, 213, 107, 0.19);
+}
+
+.render-pill span {
+  overflow-wrap: anywhere;
+  font-weight: 800;
+}
+
+.render-pill small {
+  color: #cfc5d8;
+}
+
+.render-missing {
+  opacity: 0.62;
+  border-color: rgba(255, 102, 102, 0.32);
 }
 
 .review-main {
