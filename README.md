@@ -2,8 +2,86 @@
 
 Private indie karaoke and mashup video factory.
 
+Karaoke Forge is a small local web shell around a karaoke-generation engine. The first vertical slice is intentionally boring and useful:
+
+1. upload a local song
+2. paste lyrics when you have them
+3. queue a local `karaoke-gen` run
+4. watch logs
+5. browse copied video renders from a private Tailscale-accessible web UI
+
+The goal is not to become a cloud service. The goal is a homelab karaoke factory for obscure indie songs and, later, mashups.
+
+## Current shape
+
+```text
+apps/web/static/            minimal browser UI styling
+packages/karaoke_forge/     FastAPI app, SQLite store, local runner
+scripts/                    setup and dev launch helpers
+library/                    ignored local media/job/render storage
+vendor/karaoke-gen/         upstream karaoke-gen submodule
+```
+
+## Install on Atlas
+
+```bash
+cd /mnt/scripts/karaoke-forge
+
+git pull --recurse-submodules
+git submodule update --init --recursive
+
+sudo apt update
+sudo apt install -y ffmpeg python3-venv python3-pip git
+
+chmod +x scripts/*.sh
+./scripts/dev_setup.sh
+```
+
+The setup script writes `.env.local` with Atlas-friendly defaults:
+
+```bash
+KARAOKE_FORGE_ROOT=/mnt/scripts/karaoke-forge
+WHISPER_MODEL_SIZE=medium
+WHISPER_DEVICE=cuda
+ENABLE_LOCAL_WHISPER=true
+```
+
+Adjust those values if you want CPU transcription or a different Whisper model.
+
+## Run the web app
+
+```bash
+cd /mnt/scripts/karaoke-forge
+./scripts/run_dev.sh
+```
+
+Then open:
+
+```text
+http://<atlas-tailscale-ip>:8790
+```
+
+From the UI you can upload an audio file, add artist/title, paste lyrics, and queue generation. Each job gets a detail page and log page.
+
+## CLI smoke checks
+
+```bash
+source .venv/bin/activate
+python -m pytest
+which karaoke-gen
+karaoke-gen --help | head -n 40
+ffmpeg -version | head -n 3
+nvidia-smi
+```
+
+## Notes
+
+- Do not commit songs, rendered videos, `.env.local`, API keys, or private media.
+- `library/songs`, `library/jobs`, and `library/renders` are intentionally ignored.
+- The local app shells out to `karaoke-gen`; deep pipeline customization should happen behind the runner boundary instead of infecting the web UI.
+
 ## Credits
 
-This project uses and/or adapts karaoke-gen by Nomad Karaoke, licensed under MIT.
+This project uses and/or adapts [`karaoke-gen`](https://github.com/nomadkaraoke/karaoke-gen) by Nomad Karaoke, licensed under MIT.
 
 Karaoke Forge is not affiliated with or endorsed by Nomad Karaoke.
