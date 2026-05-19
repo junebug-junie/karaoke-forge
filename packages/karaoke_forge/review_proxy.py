@@ -4,13 +4,14 @@ import html
 
 import httpx
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from .config import PUBLIC_BASE_PATH
 
 router = APIRouter()
 
 REVIEW_UPSTREAM = "http://127.0.0.1:8000"
+REVIEW_PATH = "/app/jobs/local/review"
 HOP_BY_HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -87,7 +88,8 @@ def rewrite_body(content: bytes, content_type: str) -> bytes:
 
 @router.get("/review", response_class=HTMLResponse)
 def review_tab() -> HTMLResponse:
-    iframe_src = html.escape(proxy_url("/app/jobs/local/review"))
+    iframe_src = html.escape(proxy_url(REVIEW_PATH))
+    status_url = html.escape(public_url("/review/status"))
     home_url = html.escape(public_url("/"))
     review_url = html.escape(public_url("/review"))
     css_url = html.escape(public_url("/static/style.css"))
@@ -114,11 +116,78 @@ def review_tab() -> HTMLResponse:
     <section class="panel review-panel">
       <h1>Review</h1>
       <p class="muted">Embedded karaoke-gen review session from Atlas localhost.</p>
-      <iframe class="review-frame" src="{iframe_src}"></iframe>
+      <div class="button-row">
+        <span id="review-status" class="status queued">checking review server...</span>
+        <button type="button" id="review-reload">Reload review frame</button>
+      </div>
+      <iframe id="review-frame" class="review-frame" data-src="{iframe_src}" src="{iframe_src}"></iframe>
     </section>
   </main>
+  <script>
+    const statusUrl = "{status_url}";
+    const frame = document.getElementById("review-frame");
+    const statusEl = document.getElementById("review-status");
+    const reloadButton = document.getElementById("review-reload");
+    let lastReady = null;
+    let reloadCount = 0;
+
+    function setStatus(text, cls) {{
+      statusEl.textContent = text;
+      statusEl.className = "status " + cls;
+    }}
+
+    function reloadFrame(reason) {{
+      const base = frame.dataset.src;
+      const sep = base.includes("?") ? "&" : "?";
+      frame.src = base + sep + "kf_reload=" + Date.now();
+      reloadCount += 1;
+      setStatus("review server ready — frame reloaded (" + reason + ")", "running");
+    }}
+
+    async function checkReviewServer() {{
+      try {{
+        const response = await fetch(statusUrl, {{cache: "no-store"}});
+        const data = await response.json();
+        if (data.ready) {{
+          if (lastReady !== true) {{
+            reloadFrame("server became ready");
+          }} else {{
+            setStatus("review server ready", "running");
+          }}
+          lastReady = true;
+        }} else {{
+          setStatus("waiting for karaoke-gen review server...", "queued");
+          lastReady = false;
+        }}
+      }} catch (err) {{
+        setStatus("review status check failed: " + err, "failed");
+        lastReady = false;
+      }}
+    }}
+
+    reloadButton.addEventListener("click", () => reloadFrame("manual"));
+    checkReviewServer();
+    setInterval(checkReviewServer, 2000);
+  </script>
 </body>
 </html>"""
+    )
+
+
+@router.get("/review/status")
+async def review_status() -> JSONResponse:
+    try:
+        async with httpx.AsyncClient(follow_redirects=False, timeout=1.5) as client:
+            response = await client.get(REVIEW_UPSTREAM + REVIEW_PATH)
+    except httpx.HTTPError as exc:
+        return JSONResponse({"ready": False, "error": str(exc), "review_url": proxy_url(REVIEW_PATH)})
+
+    return JSONResponse(
+        {
+            "ready": response.status_code < 500,
+            "status_code": response.status_code,
+            "review_url": proxy_url(REVIEW_PATH),
+        }
     )
 
 
