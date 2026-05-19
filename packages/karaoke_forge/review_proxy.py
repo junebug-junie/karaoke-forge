@@ -7,12 +7,13 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
-from .config import PUBLIC_BASE_PATH
+from .config import DEFAULT_INSTRUMENTAL_SELECTION, PUBLIC_BASE_PATH
 
 router = APIRouter()
 
 REVIEW_UPSTREAM = "http://127.0.0.1:8000"
 REVIEW_PATH = "/app/jobs/local/review"
+REVIEW_API_READY_PATH = "/api/correction-data"
 HOP_BY_HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -107,23 +108,6 @@ def _extract_segments(data: Any) -> list[dict[str, Any]]:
     return []
 
 
-def _segment_text(segment: dict[str, Any]) -> str:
-    for key in ("text", "corrected_text", "lyrics", "line"):
-        value = segment.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    words = segment.get("words")
-    if isinstance(words, list):
-        text = " ".join(
-            str(word.get("text") or word.get("word") or "").strip()
-            for word in words
-            if isinstance(word, dict)
-        ).strip()
-        if text:
-            return text
-    return ""
-
-
 async def _upstream_json(path: str, *, method: str = "GET", json_body: Any | None = None) -> tuple[int, Any]:
     async with httpx.AsyncClient(follow_redirects=False, timeout=30.0) as client:
         response = await client.request(
@@ -149,6 +133,7 @@ def review_tab() -> HTMLResponse:
     home_url = html.escape(public_url("/"))
     review_url = html.escape(public_url("/review"))
     css_url = html.escape(public_url("/static/style.css"))
+    default_instrumental = html.escape(DEFAULT_INSTRUMENTAL_SELECTION)
 
     return HTMLResponse(
         f"""<!doctype html>
@@ -173,11 +158,12 @@ def review_tab() -> HTMLResponse:
       <h1>Native Review</h1>
       <p class="muted">This bypasses the brittle Next.js iframe and talks to karaoke-gen's local review API directly.</p>
       <div class="button-row">
-        <span id="review-status" class="status queued">checking review server...</span>
+        <span id="review-status" class="status queued">checking review API...</span>
         <button type="button" id="native-refresh">Refresh native data</button>
-        <button type="button" id="native-complete">Finish with current/default data</button>
+        <button type="button" id="native-complete">Finish with selected data</button>
         <button type="button" id="review-reload">Reload iframe debug</button>
       </div>
+      <p class="muted">Default instrumental selection: <code id="default-instrumental">{default_instrumental}</code></p>
       <div id="native-review" class="native-review">Loading review data...</div>
       <details class="debug-details">
         <summary>Raw correction data</summary>
@@ -202,6 +188,7 @@ def review_tab() -> HTMLResponse:
     const nativeRefreshButton = document.getElementById("native-refresh");
     const nativeCompleteButton = document.getElementById("native-complete");
     let lastReady = null;
+    let completionRequested = false;
 
     function escapeHtml(value) {{
       return String(value ?? "").replace(/[&<>\"']/g, ch => ({{"&":"&amp;","<":"&lt;",">":"&gt;","\\\"":"&quot;","'":"&#039;"}}[ch]));
@@ -216,7 +203,7 @@ def review_tab() -> HTMLResponse:
       const base = frame.dataset.src;
       const sep = base.includes("?") ? "&" : "?";
       frame.src = base + sep + "kf_reload=" + Date.now();
-      setStatus("review server ready — iframe reloaded (" + reason + ")", "running");
+      setStatus("review API ready — iframe reloaded (" + reason + ")", "running");
     }}
 
     function renderNative(payload) {{
@@ -228,9 +215,14 @@ def review_tab() -> HTMLResponse:
       const rows = segments.length
         ? segments.map((seg, idx) => `<tr><td>${{idx + 1}}</td><td>${{escapeHtml(seg.start ?? seg.start_time ?? "")}}</td><td>${{escapeHtml(seg.end ?? seg.end_time ?? "")}}</td><td>${{escapeHtml(seg.text || seg.corrected_text || seg.lyrics || seg.line || "")}}</td></tr>`).join("")
         : `<tr><td colspan="4">No segment list found in correction payload. Use the raw JSON drawer.</td></tr>`;
+      const defaultSelection = document.getElementById("default-instrumental").textContent || "clean";
       const inst = instrumentals.length
-        ? `<ul>${{instrumentals.map(opt => `<li><strong>${{escapeHtml(opt.label || opt.id || "option")}}</strong> <code>${{escapeHtml(opt.audio_path || opt.audio_url || "")}}</code></li>`).join("")}}</ul>`
-        : `<p class="muted">No instrumental options found in payload.</p>`;
+        ? `<fieldset><legend>Instrumental selection</legend>${{instrumentals.map((opt, idx) => {{
+            const id = opt.id || opt.value || (idx === 0 ? "clean" : "with_backing");
+            const checked = id === defaultSelection || (!instrumentals.some(o => (o.id || o.value) === defaultSelection) && idx === 0);
+            return `<label class="radio-row"><input type="radio" name="instrumental_selection" value="${{escapeHtml(id)}}" ${{checked ? "checked" : ""}} /> <strong>${{escapeHtml(opt.label || id)}}</strong> <code>${{escapeHtml(opt.audio_path || opt.audio_url || "")}}</code></label>`;
+          }}).join("")}}</fieldset>`
+        : `<p class="muted">No instrumental options found in payload; defaulting to <code>${{escapeHtml(defaultSelection)}}</code>.</p>`;
       nativeEl.innerHTML = `
         <h2>${{escapeHtml(title)}}</h2>
         <h3>Instrumental options</h3>
@@ -245,13 +237,17 @@ def review_tab() -> HTMLResponse:
         const response = await fetch(dataUrl, {{cache: "no-store"}});
         const payload = await response.json();
         if (!response.ok || payload.ready === false) {{
-          nativeEl.innerHTML = `<p class="error">${{escapeHtml(payload.error || "Review data not ready")}}</p>`;
+          if (!completionRequested) {{
+            nativeEl.innerHTML = `<p class="error">${{escapeHtml(payload.error || "Review data not ready")}}</p>`;
+          }}
           nativeJsonEl.textContent = JSON.stringify(payload, null, 2);
           return;
         }}
         renderNative(payload);
       }} catch (err) {{
-        nativeEl.innerHTML = `<p class="error">Failed to load native review data: ${{escapeHtml(err)}}</p>`;
+        if (!completionRequested) {{
+          nativeEl.innerHTML = `<p class="error">Failed to load native review data: ${{escapeHtml(err)}}</p>`;
+        }}
       }}
     }}
 
@@ -259,16 +255,21 @@ def review_tab() -> HTMLResponse:
       nativeCompleteButton.disabled = true;
       nativeCompleteButton.textContent = "Finishing...";
       try {{
-        const response = await fetch(completeUrl, {{method: "POST", cache: "no-store"}});
+        const selected = document.querySelector('input[name="instrumental_selection"]:checked');
+        const selection = selected ? selected.value : (document.getElementById("default-instrumental").textContent || "clean");
+        const url = completeUrl + "?instrumental_selection=" + encodeURIComponent(selection);
+        const response = await fetch(url, {{method: "POST", cache: "no-store"}});
         const payload = await response.json();
         nativeJsonEl.textContent = JSON.stringify(payload, null, 2);
-        if (!response.ok) throw new Error(payload.error || "complete failed");
-        nativeEl.insertAdjacentHTML("afterbegin", `<p class="status done">Review completion request sent. Watch the job log for final render.</p>`);
+        if (!response.ok || payload.ok === false) throw new Error(JSON.stringify(payload.error || payload));
+        completionRequested = true;
+        setStatus("review submitted — waiting for karaoke-gen to finalise", "done");
+        nativeEl.insertAdjacentHTML("afterbegin", `<p class="status done">Review completion accepted with instrumental <code>${{escapeHtml(selection)}}</code>. Watch the job log for final render.</p>`);
       }} catch (err) {{
         nativeEl.insertAdjacentHTML("afterbegin", `<p class="error">Finish failed: ${{escapeHtml(err)}}</p>`);
       }} finally {{
         nativeCompleteButton.disabled = false;
-        nativeCompleteButton.textContent = "Finish with current/default data";
+        nativeCompleteButton.textContent = "Finish with selected data";
       }}
     }}
 
@@ -277,19 +278,29 @@ def review_tab() -> HTMLResponse:
         const response = await fetch(statusUrl, {{cache: "no-store"}});
         const data = await response.json();
         if (data.ready) {{
-          if (lastReady !== true) {{
-            reloadFrame("server became ready");
+          if (completionRequested) {{
+            setStatus("review submitted — waiting for review API to close", "done");
+          }} else if (lastReady !== true) {{
+            reloadFrame("API became ready");
             loadNativeData();
           }} else {{
-            setStatus("review server ready", "running");
+            setStatus("review API ready", "running");
           }}
           lastReady = true;
         }} else {{
-          setStatus("waiting for karaoke-gen review server...", "queued");
+          if (completionRequested) {{
+            setStatus("review API closed — karaoke-gen should be finalising", "done");
+          }} else {{
+            setStatus("waiting for karaoke-gen review API...", "queued");
+          }}
           lastReady = false;
         }}
       }} catch (err) {{
-        setStatus("review status check failed: " + err, "failed");
+        if (completionRequested) {{
+          setStatus("review API closed — karaoke-gen should be finalising", "done");
+        }} else {{
+          setStatus("review status check failed: " + err, "failed");
+        }}
         lastReady = false;
       }}
     }}
@@ -309,18 +320,23 @@ def review_tab() -> HTMLResponse:
 @router.get("/review/status")
 async def review_status() -> JSONResponse:
     try:
-        async with httpx.AsyncClient(follow_redirects=False, timeout=1.5) as client:
-            response = await client.get(
-                REVIEW_UPSTREAM + REVIEW_PATH,
-                headers={"accept-encoding": "identity"},
-            )
+        status, payload = await _upstream_json(REVIEW_API_READY_PATH)
     except httpx.HTTPError as exc:
-        return JSONResponse({"ready": False, "error": str(exc), "review_url": proxy_url(REVIEW_PATH)})
+        return JSONResponse(
+            {
+                "ready": False,
+                "phase": "review_api_unavailable",
+                "error": str(exc),
+                "review_url": proxy_url(REVIEW_PATH),
+            }
+        )
 
     return JSONResponse(
         {
-            "ready": response.status_code < 500,
-            "status_code": response.status_code,
+            "ready": status < 500,
+            "phase": "review_api_ready" if status < 500 else "review_api_error",
+            "status_code": status,
+            "has_payload": isinstance(payload, dict),
             "review_url": proxy_url(REVIEW_PATH),
         }
     )
@@ -343,14 +359,15 @@ async def native_review_data() -> JSONResponse:
 
 
 @router.post("/review/native/complete")
-async def native_complete_review() -> JSONResponse:
+async def native_complete_review(instrumental_selection: str | None = None) -> JSONResponse:
     try:
         status, correction_data = await _upstream_json("/api/correction-data")
         if status >= 400:
             return JSONResponse({"ok": False, "stage": "load", "status_code": status, "error": correction_data}, status_code=502)
 
+        selection = (instrumental_selection or DEFAULT_INSTRUMENTAL_SELECTION or "clean").strip()
         payload: dict[str, Any] = correction_data if isinstance(correction_data, dict) else {}
-        payload.setdefault("instrumental_selection", "with_backing")
+        payload["instrumental_selection"] = selection
         payload.setdefault("is_duet", False)
 
         complete_status, complete_payload = await _upstream_json("/api/complete", method="POST", json_body=payload)
@@ -359,7 +376,7 @@ async def native_complete_review() -> JSONResponse:
                 {"ok": False, "stage": "complete", "status_code": complete_status, "error": complete_payload},
                 status_code=502,
             )
-        return JSONResponse({"ok": True, "status_code": complete_status, "response": complete_payload})
+        return JSONResponse({"ok": True, "status_code": complete_status, "instrumental_selection": selection, "response": complete_payload})
     except httpx.HTTPError as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
 
