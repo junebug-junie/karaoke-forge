@@ -1,0 +1,27 @@
+[project]
+name = "karaoke-forge"
+version = "0.1.0"
+description = "Private indie karaoke and mashup video factory."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.30.0",
+  "python-multipart>=0.0.9",
+  "pydantic>=2.7.0"
+]
+
+[project.optional-dependencies]
+generator = [
+  "karaoke-gen[local-whisper]"
+]
+dev = [
+  "pytest>=8.0.0"
+]
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["packages*"]
