@@ -80,6 +80,34 @@ button {
   cursor: pointer;
 }
 
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin: 12px 0 16px;
+}
+
+.button-row button,
+.button-row .button-link,
+.button-link {
+  width: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.button-link {
+  color: #130a1e !important;
+  background: #f0d56b;
+  font-weight: 800;
+  text-decoration: none;
+}
+
 .job {
   display: flex;
   justify-content: space-between;
@@ -227,6 +255,58 @@ code {
 
 .review-panel {
   padding: 16px;
+}
+
+.review-panel textarea {
+  min-height: 150px;
+}
+
+.native-review {
+  margin-top: 18px;
+}
+
+.review-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 10px;
+}
+
+.review-table th,
+.review-table td {
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  padding: 8px;
+  vertical-align: top;
+}
+
+.review-table th {
+  text-align: left;
+  color: #cfc5d8;
+}
+
+.review-table .time-edit {
+  width: 95px;
+  padding: 8px;
+}
+
+.review-table .segment-edit {
+  min-height: 54px;
+  padding: 8px;
+}
+
+.pasted-line,
+.debug-summary {
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.lyric-mismatch {
+  background: rgba(240, 213, 107, 0.05);
+}
+
+.marked-delete {
+  opacity: 0.62;
+  background: rgba(255, 102, 102, 0.08);
 }
 
 .review-frame {
