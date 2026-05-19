@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import html
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -9,7 +8,6 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from .config import DEFAULT_INSTRUMENTAL_SELECTION, PUBLIC_BASE_PATH
-from .store import list_jobs
 
 router = APIRouter()
 
@@ -92,31 +90,48 @@ def _looks_like_segment_list(value: Any) -> bool:
     return isinstance(value, list) and any(isinstance(item, dict) for item in value)
 
 
-def _find_segments_list(data: Any) -> list[Any] | None:
+def _find_named_segment_list(data: Any, keys: tuple[str, ...], *, path: str = "$") -> tuple[str, list[Any], str] | None:
     if isinstance(data, dict):
-        for key in ("segments", "lyrics_segments", "corrected_segments"):
+        for key in keys:
             value = data.get(key)
             if _looks_like_segment_list(value):
-                return value
-        for value in data.values():
-            found = _find_segments_list(value)
+                return key, value, f"{path}.{key}"
+        for key, value in data.items():
+            found = _find_named_segment_list(value, keys, path=f"{path}.{key}")
             if found is not None:
                 return found
     elif isinstance(data, list):
-        if _looks_like_segment_list(data):
-            return data
-        for value in data:
-            found = _find_segments_list(value)
+        for idx, value in enumerate(data):
+            found = _find_named_segment_list(value, keys, path=f"{path}[{idx}]")
             if found is not None:
                 return found
     return None
 
 
-def _extract_segments(data: Any) -> list[dict[str, Any]]:
-    segments = _find_segments_list(data)
-    if segments is None:
+def _find_corrected_segments(data: Any) -> tuple[list[Any], str] | None:
+    found = _find_named_segment_list(data, ("corrected_segments",))
+    if found is None:
+        return None
+    _key, segment_list, path = found
+    return segment_list, path
+
+
+def _find_display_segments(data: Any) -> tuple[list[Any], str, str] | None:
+    corrected = _find_named_segment_list(data, ("corrected_segments",))
+    if corrected is not None:
+        key, segment_list, path = corrected
+        return segment_list, key, path
+    fallback = _find_named_segment_list(data, ("segments", "lyrics_segments"))
+    if fallback is not None:
+        key, segment_list, path = fallback
+        return segment_list, key, path
+    return None
+
+
+def _extract_segment_dicts(segment_list: list[Any] | None) -> list[dict[str, Any]]:
+    if segment_list is None:
         return []
-    return [item for item in segments if isinstance(item, dict)]
+    return [item for item in segment_list if isinstance(item, dict)]
 
 
 def _segment_text(segment: dict[str, Any]) -> str:
@@ -174,7 +189,7 @@ def _parse_timestamp_seconds(value: Any) -> float | None:
     return None
 
 
-def _set_segment_text(segment: dict[str, Any], text: str) -> None:
+def _set_segment_text(segment: dict[str, Any], text: str) -> bool:
     updated = False
     for key in SEGMENT_TEXT_KEYS:
         if key in segment:
@@ -182,9 +197,11 @@ def _set_segment_text(segment: dict[str, Any], text: str) -> None:
             updated = True
     if not updated:
         segment["text"] = text
+        updated = True
+    return updated
 
 
-def _set_segment_time(segment: dict[str, Any], keys: tuple[str, ...], value: float) -> None:
+def _set_segment_time(segment: dict[str, Any], keys: tuple[str, ...], value: float) -> bool:
     updated = False
     for key in keys:
         if key in segment:
@@ -192,19 +209,80 @@ def _set_segment_time(segment: dict[str, Any], keys: tuple[str, ...], value: flo
             updated = True
     if not updated:
         segment[keys[0]] = value
+        updated = True
+    return updated
 
 
-def _apply_segment_edits(data: Any, edits: Any) -> dict[str, int]:
-    result = {"text": 0, "timing": 0, "deleted": 0}
+def _apply_text_and_timing(segment: dict[str, Any], edit: dict[str, Any]) -> tuple[int, int]:
+    text_edits = 0
+    timing_edits = 0
+
+    text = str(edit.get("text") or "").strip()
+    if text and text != _segment_text(segment):
+        if _set_segment_text(segment, text):
+            text_edits += 1
+
+    start = _parse_timestamp_seconds(edit.get("start"))
+    if start is not None and start != _segment_time(segment, SEGMENT_START_KEYS):
+        if _set_segment_time(segment, SEGMENT_START_KEYS, start):
+            timing_edits += 1
+
+    end = _parse_timestamp_seconds(edit.get("end"))
+    if end is not None and end != _segment_time(segment, SEGMENT_END_KEYS):
+        if _set_segment_time(segment, SEGMENT_END_KEYS, end):
+            timing_edits += 1
+
+    return text_edits, timing_edits
+
+
+def _find_parallel_corrections(data: Any, expected_len: int) -> tuple[list[Any], str] | None:
+    found = _find_named_segment_list(data, ("corrections",))
+    if found is None:
+        return None
+    _key, corrections, path = found
+    if len(corrections) != expected_len:
+        return None
+    return corrections, path
+
+
+def _apply_segment_edits_to_corrected_segments(data: Any, edits: Any) -> dict[str, Any]:
+    corrected = _find_corrected_segments(data)
+    if corrected is None:
+        return {
+            "corrected_segments_found": False,
+            "corrected_segments_path": None,
+            "before_corrected_segments_count": 0,
+            "after_corrected_segments_count": 0,
+            "removed_indexes": [],
+            "skipped_indexes": [],
+            "text_edit_count": 0,
+            "timing_edit_count": 0,
+            "corrections_updated": 0,
+            "corrections_path": None,
+        }
+
+    corrected_segments, corrected_path = corrected
+    before_count = len(corrected_segments)
+    corrections = _find_parallel_corrections(data, before_count)
+    corrections_list = corrections[0] if corrections else None
+    corrections_path = corrections[1] if corrections else None
+
+    result: dict[str, Any] = {
+        "corrected_segments_found": True,
+        "corrected_segments_path": corrected_path,
+        "before_corrected_segments_count": before_count,
+        "after_corrected_segments_count": before_count,
+        "removed_indexes": [],
+        "skipped_indexes": [],
+        "text_edit_count": 0,
+        "timing_edit_count": 0,
+        "corrections_updated": 0,
+        "corrections_path": corrections_path,
+    }
     if not isinstance(edits, list):
         return result
 
-    segment_list = _find_segments_list(data)
-    if segment_list is None:
-        return result
-    segments = [item for item in segment_list if isinstance(item, dict)]
-
-    delete_indexes: list[int] = []
+    delete_indexes: set[int] = set()
     for edit in edits:
         if not isinstance(edit, dict):
             continue
@@ -212,62 +290,77 @@ def _apply_segment_edits(data: Any, edits: Any) -> dict[str, int]:
             idx = int(edit.get("index"))
         except (TypeError, ValueError):
             continue
-        if idx < 0 or idx >= len(segments):
+        if idx < 0 or idx >= before_count:
+            result["skipped_indexes"].append(idx)
             continue
         if bool(edit.get("delete")):
-            delete_indexes.append(idx)
+            delete_indexes.add(idx)
             continue
 
-        segment = segments[idx]
-        text = str(edit.get("text") or "").strip()
-        if text and text != _segment_text(segment):
-            _set_segment_text(segment, text)
-            result["text"] += 1
+        segment = corrected_segments[idx]
+        if not isinstance(segment, dict):
+            result["skipped_indexes"].append(idx)
+            continue
+        text_count, timing_count = _apply_text_and_timing(segment, edit)
+        result["text_edit_count"] += text_count
+        result["timing_edit_count"] += timing_count
 
-        start = _parse_timestamp_seconds(edit.get("start"))
-        if start is not None and start != _segment_time(segment, SEGMENT_START_KEYS):
-            _set_segment_time(segment, SEGMENT_START_KEYS, start)
-            result["timing"] += 1
+        if corrections_list is not None and isinstance(corrections_list[idx], dict):
+            correction_text, correction_timing = _apply_text_and_timing(corrections_list[idx], edit)
+            if correction_text or correction_timing:
+                result["corrections_updated"] += 1
 
-        end = _parse_timestamp_seconds(edit.get("end"))
-        if end is not None and end != _segment_time(segment, SEGMENT_END_KEYS):
-            _set_segment_time(segment, SEGMENT_END_KEYS, end)
-            result["timing"] += 1
+    for idx in sorted(delete_indexes, reverse=True):
+        if idx < 0 or idx >= len(corrected_segments):
+            result["skipped_indexes"].append(idx)
+            continue
+        del corrected_segments[idx]
+        if corrections_list is not None and idx < len(corrections_list):
+            del corrections_list[idx]
+            result["corrections_updated"] += 1
+        result["removed_indexes"].append(idx)
 
-    for idx in sorted(set(delete_indexes), reverse=True):
-        target = segments[idx]
-        try:
-            segment_list.remove(target)
-            result["deleted"] += 1
-        except ValueError:
-            pass
-
+    result["removed_indexes"] = sorted(result["removed_indexes"])
+    result["skipped_indexes"] = sorted(set(result["skipped_indexes"]))
+    result["after_corrected_segments_count"] = len(corrected_segments)
     return result
 
 
-def _canonical_lyrics_payload() -> dict[str, Any]:
-    for job in list_jobs(limit=50):
-        if not job.lyrics_path:
-            continue
-        path = Path(job.lyrics_path)
-        if not path.exists():
-            continue
-        lines = [
-            line.strip()
-            for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
-            if line.strip()
-        ]
+def _review_contract_debug(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
         return {
-            "canonical_lyrics_lines": lines,
-            "canonical_lyrics_source": str(path),
-            "canonical_lyrics_job_id": job.id,
-            "canonical_lyrics_title": f"{job.artist} — {job.title}",
+            "raw_correction_payload_keys": [],
+            "corrected_segments_count": 0,
+            "corrected_segments_path": None,
+            "display_segments_count": 0,
+            "display_segments_source_key": None,
+            "display_segments_path": None,
+            "display_segments_relation": "payload_not_object",
         }
+
+    corrected = _find_corrected_segments(payload)
+    display = _find_display_segments(payload)
+    corrected_list = corrected[0] if corrected else None
+    corrected_path = corrected[1] if corrected else None
+    display_list = display[0] if display else None
+    display_key = display[1] if display else None
+    display_path = display[2] if display else None
+
+    if corrected_path and display_path == corrected_path:
+        relation = "display_segments_is_corrected_segments"
+    elif display_path:
+        relation = "display_segments_is_derived_or_fallback"
+    else:
+        relation = "no_display_segments_found"
+
     return {
-        "canonical_lyrics_lines": [],
-        "canonical_lyrics_source": None,
-        "canonical_lyrics_job_id": None,
-        "canonical_lyrics_title": None,
+        "raw_correction_payload_keys": list(payload.keys()),
+        "corrected_segments_count": len(corrected_list) if corrected_list is not None else 0,
+        "corrected_segments_path": corrected_path,
+        "display_segments_count": len(display_list) if display_list is not None else 0,
+        "display_segments_source_key": display_key,
+        "display_segments_path": display_path,
+        "display_segments_relation": relation,
     }
 
 
@@ -305,16 +398,26 @@ HTML_TEMPLATE = """<!doctype html>
     </header>
     <section class="panel review-panel">
       <h1>Native Review</h1>
-      <p class="muted">Treat pasted lyrics as canonical. Use them by line order, then adjust timing/deletions.</p>
+      <p class="muted">Rows shown here are the upstream <code>corrected_segments</code> contract. Finish mutates that same array before karaoke-gen finalizes.</p>
       <div class="button-row">
         <span id="review-status" class="status queued">checking review API...</span>
         <button type="button" id="native-refresh">Refresh native data</button>
-        <button type="button" id="apply-pasted">Apply pasted lyrics by line order</button>
+        <button type="button" id="apply-canonical">Apply canonical lyrics by line order</button>
+        <button type="button" id="delete-after-canonical">Remove rows after final canonical lyric</button>
         <button type="button" id="native-complete">Finish with selected data</button>
         <button type="button" id="review-reload">Reload iframe debug</button>
       </div>
       <p class="muted">Default instrumental selection: <code id="default-instrumental">__DEFAULT_INSTRUMENTAL__</code></p>
+      <section class="canonical-lyrics-panel">
+        <h2>Canonical lyrics for this review</h2>
+        <p class="muted">Paste the finite lyric script here for this active review only. Nothing is pulled from older jobs.</p>
+        <textarea id="canonical-lyrics-text" class="canonical-lyrics-text" rows="10" placeholder="Paste one lyric line per row..."></textarea>
+      </section>
       <div id="native-review" class="native-review">Loading review data...</div>
+      <details class="debug-details" open>
+        <summary>Payload contract debug</summary>
+        <pre id="contract-json" class="live-log">No data yet.</pre>
+      </details>
       <details class="debug-details">
         <summary>Raw correction data</summary>
         <pre id="native-json" class="live-log">No data yet.</pre>
@@ -330,17 +433,20 @@ HTML_TEMPLATE = """<!doctype html>
     const statusUrl = "__STATUS_URL__";
     const dataUrl = "__DATA_URL__";
     const completeUrl = "__COMPLETE_URL__";
+    const canonicalStorageKey = "karaokeForge.nativeReview.canonicalLyrics";
     const frame = document.getElementById("review-frame");
     const statusEl = document.getElementById("review-status");
     const nativeEl = document.getElementById("native-review");
     const nativeJsonEl = document.getElementById("native-json");
+    const contractJsonEl = document.getElementById("contract-json");
+    const canonicalLyricsEl = document.getElementById("canonical-lyrics-text");
     const reloadButton = document.getElementById("review-reload");
     const nativeRefreshButton = document.getElementById("native-refresh");
     const nativeCompleteButton = document.getElementById("native-complete");
-    const applyPastedButton = document.getElementById("apply-pasted");
+    const applyCanonicalButton = document.getElementById("apply-canonical");
+    const deleteAfterCanonicalButton = document.getElementById("delete-after-canonical");
     let lastReady = null;
     let completionRequested = false;
-    let canonicalLyrics = [];
 
     function escapeHtml(value) {
       return String(value ?? "").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[ch]));
@@ -348,6 +454,15 @@ HTML_TEMPLATE = """<!doctype html>
     function setStatus(text, cls) {
       statusEl.textContent = text;
       statusEl.className = "status " + cls;
+    }
+    function parseCanonicalLines() {
+      return canonicalLyricsEl.value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    }
+    function persistCanonicalLyrics() {
+      try { localStorage.setItem(canonicalStorageKey, canonicalLyricsEl.value); } catch (err) {}
+    }
+    function restoreCanonicalLyrics() {
+      try { canonicalLyricsEl.value = localStorage.getItem(canonicalStorageKey) || ""; } catch (err) { canonicalLyricsEl.value = ""; }
     }
     function segmentText(seg) {
       return seg.text || seg.corrected_text || seg.lyrics || seg.line || "";
@@ -381,22 +496,42 @@ HTML_TEMPLATE = """<!doctype html>
         };
       }).filter(edit => edit.delete || edit.text !== edit.original_text || edit.start !== edit.original_start || edit.end !== edit.original_end);
     }
-    function setRowTextFromPasted(row) {
+    function setRowTextFromCanonical(row, canonicalLines) {
       const idx = Number(row.dataset.segmentIndex);
-      const pasted = canonicalLyrics[idx];
-      if (!pasted) return false;
+      const canonicalLine = canonicalLines[idx];
+      if (!canonicalLine) return false;
       const textEl = row.querySelector("textarea[data-field='text']");
       if (!textEl) return false;
-      textEl.value = pasted;
+      textEl.value = canonicalLine;
       row.classList.add("lyrics-applied");
       return true;
     }
-    function applyPastedLyricsByLineOrder() {
+    function applyCanonicalLyricsByLineOrder() {
+      persistCanonicalLyrics();
+      const canonicalLines = parseCanonicalLines();
       let applied = 0;
       document.querySelectorAll("tr[data-segment-index]").forEach(row => {
-        if (setRowTextFromPasted(row)) applied += 1;
+        const idx = Number(row.dataset.segmentIndex);
+        if (idx >= canonicalLines.length) return;
+        if (setRowTextFromCanonical(row, canonicalLines)) applied += 1;
       });
-      setStatus(`applied ${applied} pasted lyric line(s) by row order`, "done");
+      setStatus(`applied ${applied} canonical lyric line(s); extras are not touched`, "done");
+    }
+    function removeRowsAfterFinalCanonicalLyric() {
+      persistCanonicalLyrics();
+      const canonicalLines = parseCanonicalLines();
+      let marked = 0;
+      document.querySelectorAll("tr[data-segment-index]").forEach(row => {
+        const idx = Number(row.dataset.segmentIndex);
+        const deleteEl = row.querySelector("input[data-field='delete']");
+        if (!deleteEl) return;
+        if (idx >= canonicalLines.length) {
+          deleteEl.checked = true;
+          row.classList.add("marked-delete");
+          marked += 1;
+        }
+      });
+      setStatus(`marked ${marked} tail row(s) for deletion after canonical line ${canonicalLines.length}`, "done");
     }
     function reloadFrame(reason) {
       const base = frame.dataset.src;
@@ -406,22 +541,23 @@ HTML_TEMPLATE = """<!doctype html>
     }
     function renderNative(payload) {
       nativeJsonEl.textContent = JSON.stringify(payload, null, 2);
+      contractJsonEl.textContent = JSON.stringify(payload.review_debug || {}, null, 2);
       const segments = payload.segments || [];
-      canonicalLyrics = payload.canonical_lyrics_lines || [];
-      const source = payload.canonical_lyrics_source || "none";
       const instrumentals = payload.instrumental_options || [];
       const meta = payload.metadata || {};
-      const title = [meta.artist, meta.title].filter(Boolean).join(" — ") || payload.canonical_lyrics_title || "Current review session";
+      const debug = payload.review_debug || {};
+      const title = [meta.artist, meta.title].filter(Boolean).join(" — ") || "Current review session";
+      const canonicalLines = parseCanonicalLines();
       const rows = segments.length
         ? segments.map((seg, idx) => {
             const text = segmentText(seg);
-            const pasted = canonicalLyrics[idx] || "";
-            const mismatch = pasted && pasted.trim() !== text.trim();
+            const canonicalLine = canonicalLines[idx] || "";
+            const mismatch = canonicalLine && canonicalLine.trim() !== text.trim();
             const start = formatTimestamp(seg.start ?? seg.start_time ?? "");
             const end = formatTimestamp(seg.end ?? seg.end_time ?? "");
-            return `<tr data-segment-index="${idx}" class="${mismatch ? "lyric-mismatch" : ""}"><td>${idx + 1}</td><td><input class="time-edit" data-field="start" data-original-value="${escapeHtml(start)}" value="${escapeHtml(start)}" /></td><td><input class="time-edit" data-field="end" data-original-value="${escapeHtml(end)}" value="${escapeHtml(end)}" /></td><td><textarea class="segment-edit" data-field="text" data-original-value="${escapeHtml(text)}" rows="2">${escapeHtml(text)}</textarea></td><td>${pasted ? `<div class="pasted-line">${escapeHtml(pasted)}</div><button type="button" data-use-pasted="${idx}">Use pasted</button>` : `<span class="muted">no pasted line</span>`}</td><td><label><input type="checkbox" data-field="delete" /> delete</label></td></tr>`;
+            return `<tr data-segment-index="${idx}" class="${mismatch ? "lyric-mismatch" : ""}"><td>${idx + 1}</td><td><input class="time-edit" data-field="start" data-original-value="${escapeHtml(start)}" value="${escapeHtml(start)}" /></td><td><input class="time-edit" data-field="end" data-original-value="${escapeHtml(end)}" value="${escapeHtml(end)}" /></td><td><textarea class="segment-edit" data-field="text" data-original-value="${escapeHtml(text)}" rows="2">${escapeHtml(text)}</textarea></td><td>${canonicalLine ? `<div class="pasted-line">${escapeHtml(canonicalLine)}</div><button type="button" data-use-canonical="${idx}">Use canonical</button>` : `<span class="muted">no canonical line</span>`}</td><td><label><input type="checkbox" data-field="delete" /> delete</label></td></tr>`;
           }).join("")
-        : `<tr><td colspan="6">No segment list found in correction payload. Use the raw JSON drawer.</td></tr>`;
+        : `<tr><td colspan="6">No corrected_segments list found in correction payload. Use the contract debug drawer.</td></tr>`;
       const defaultSelection = document.getElementById("default-instrumental").textContent || "clean";
       const inst = instrumentals.length
         ? `<fieldset><legend>Instrumental selection</legend>${instrumentals.map((opt, idx) => {
@@ -432,20 +568,23 @@ HTML_TEMPLATE = """<!doctype html>
         : `<p class="muted">No instrumental options found in payload; defaulting to <code>${escapeHtml(defaultSelection)}</code>.</p>`;
       nativeEl.innerHTML = `
         <h2>${escapeHtml(title)}</h2>
+        <div class="debug-summary"><strong>Contract:</strong> display source <code>${escapeHtml(debug.display_segments_source_key || "none")}</code>, relation <code>${escapeHtml(debug.display_segments_relation || "unknown")}</code>, corrected count <code>${escapeHtml(debug.corrected_segments_count ?? 0)}</code>, display count <code>${escapeHtml(debug.display_segments_count ?? 0)}</code></div>
         <h3>Instrumental options</h3>
         ${inst}
         <h3>Lyric segments</h3>
-        <p class="muted">Pasted lyric source: <code>${escapeHtml(source)}</code>. Time fields accept seconds, m:ss, or m:ss.mm.</p>
-        <table class="review-table"><thead><tr><th>#</th><th>Start</th><th>End</th><th>Final editable text</th><th>Pasted lyric line</th><th>Delete</th></tr></thead><tbody>${rows}</tbody></table>
+        <p class="muted">Time fields accept seconds, m:ss, or m:ss.mm. Deletions are applied to the actual <code>corrected_segments</code> array during submit.</p>
+        <table class="review-table"><thead><tr><th>#</th><th>Start</th><th>End</th><th>Final editable text</th><th>Canonical lyric line</th><th>Delete</th></tr></thead><tbody>${rows}</tbody></table>
       `;
     }
     async function loadNativeData() {
+      persistCanonicalLyrics();
       try {
         const response = await fetch(dataUrl, {cache: "no-store"});
         const payload = await response.json();
         if (!response.ok || payload.ready === false) {
           if (!completionRequested) nativeEl.innerHTML = `<p class="error">${escapeHtml(payload.error || "Review data not ready")}</p>`;
           nativeJsonEl.textContent = JSON.stringify(payload, null, 2);
+          contractJsonEl.textContent = JSON.stringify(payload.review_debug || {}, null, 2);
           return;
         }
         renderNative(payload);
@@ -454,6 +593,7 @@ HTML_TEMPLATE = """<!doctype html>
       }
     }
     async function completeNativeReview() {
+      persistCanonicalLyrics();
       nativeCompleteButton.disabled = true;
       nativeCompleteButton.textContent = "Finishing...";
       try {
@@ -469,11 +609,11 @@ HTML_TEMPLATE = """<!doctype html>
         });
         const payload = await response.json();
         nativeJsonEl.textContent = JSON.stringify(payload, null, 2);
+        contractJsonEl.textContent = JSON.stringify(payload.review_debug || payload, null, 2);
         if (!response.ok || payload.ok === false) throw new Error(JSON.stringify(payload.error || payload));
         completionRequested = true;
-        const counts = payload.applied_segment_edits || {};
         setStatus("review submitted — waiting for karaoke-gen to finalise", "done");
-        nativeEl.insertAdjacentHTML("afterbegin", `<p class="status done">Review accepted with instrumental <code>${escapeHtml(selection)}</code>; text edits: ${counts.text || 0}, timing edits: ${counts.timing || 0}, deleted: ${counts.deleted || 0}. Watch the job log for final render.</p>`);
+        nativeEl.insertAdjacentHTML("afterbegin", `<p class="status done">Review accepted with instrumental <code>${escapeHtml(selection)}</code>; corrected_segments ${payload.before_corrected_segments_count} → ${payload.after_corrected_segments_count}; text edits: ${payload.text_edit_count || 0}, timing edits: ${payload.timing_edit_count || 0}, removed indexes: ${(payload.removed_indexes || []).join(", ") || "none"}. Watch the job log for final render.</p>`);
       } catch (err) {
         nativeEl.insertAdjacentHTML("afterbegin", `<p class="error">Finish failed: ${escapeHtml(err)}</p>`);
       } finally {
@@ -500,15 +640,18 @@ HTML_TEMPLATE = """<!doctype html>
       }
     }
     nativeEl.addEventListener("click", event => {
-      const button = event.target.closest("button[data-use-pasted]");
+      const button = event.target.closest("button[data-use-canonical]");
       if (!button) return;
       const row = button.closest("tr[data-segment-index]");
-      if (row && setRowTextFromPasted(row)) setStatus("pasted lyric copied into row " + (Number(row.dataset.segmentIndex) + 1), "done");
+      if (row && setRowTextFromCanonical(row, parseCanonicalLines())) setStatus("canonical lyric copied into row " + (Number(row.dataset.segmentIndex) + 1), "done");
     });
+    canonicalLyricsEl.addEventListener("input", persistCanonicalLyrics);
     reloadButton.addEventListener("click", () => reloadFrame("manual"));
     nativeRefreshButton.addEventListener("click", loadNativeData);
     nativeCompleteButton.addEventListener("click", completeNativeReview);
-    applyPastedButton.addEventListener("click", applyPastedLyricsByLineOrder);
+    applyCanonicalButton.addEventListener("click", applyCanonicalLyricsByLineOrder);
+    deleteAfterCanonicalButton.addEventListener("click", removeRowsAfterFinalCanonicalLyric);
+    restoreCanonicalLyrics();
     checkReviewServer();
     loadNativeData();
     setInterval(checkReviewServer, 2000);
@@ -553,11 +696,19 @@ async def native_review_data() -> JSONResponse:
         return JSONResponse({"ready": False, "error": str(exc)}, status_code=502)
     if status >= 400:
         return JSONResponse({"ready": False, "status_code": status, "error": payload}, status_code=502)
-    if isinstance(payload, dict):
-        payload = dict(payload)
-        payload.setdefault("segments", _extract_segments(payload))
-        payload.update(_canonical_lyrics_payload())
-    return JSONResponse(payload)
+    if not isinstance(payload, dict):
+        return JSONResponse({"ready": False, "error": "correction payload was not an object", "payload_type": type(payload).__name__}, status_code=502)
+
+    display = _find_display_segments(payload)
+    display_segments = _extract_segment_dicts(display[0] if display else None)
+    response_payload = dict(payload)
+    response_payload["segments"] = display_segments
+    response_payload["canonical_lyrics_lines"] = []
+    response_payload["canonical_lyrics_source"] = None
+    response_payload["canonical_lyrics_job_id"] = None
+    response_payload["canonical_lyrics_title"] = None
+    response_payload["review_debug"] = _review_contract_debug(payload)
+    return JSONResponse(response_payload)
 
 
 @router.post("/review/native/complete")
@@ -566,20 +717,68 @@ async def native_complete_review(request: Request, instrumental_selection: str |
         status, correction_data = await _upstream_json("/api/correction-data")
         if status >= 400:
             return JSONResponse({"ok": False, "stage": "load", "status_code": status, "error": correction_data}, status_code=502)
+        if not isinstance(correction_data, dict):
+            return JSONResponse({"ok": False, "stage": "load", "error": "correction payload was not an object", "payload_type": type(correction_data).__name__}, status_code=502)
+
         try:
             body = await request.json()
         except Exception:
             body = {}
+
         selection = (instrumental_selection or DEFAULT_INSTRUMENTAL_SELECTION or "clean").strip()
-        payload: dict[str, Any] = correction_data if isinstance(correction_data, dict) else {}
-        applied_edits = _apply_segment_edits(payload, body.get("segment_edits"))
-        payload.setdefault("segments", _extract_segments(payload))
+        payload: dict[str, Any] = correction_data
+        edit_debug = _apply_segment_edits_to_corrected_segments(payload, body.get("segment_edits"))
+
+        if not edit_debug["corrected_segments_found"]:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "stage": "edit",
+                    "error": "No corrected_segments list found; refusing to submit display-only edits.",
+                    "review_debug": _review_contract_debug(payload),
+                    **edit_debug,
+                },
+                status_code=422,
+            )
+
+        corrected = _find_corrected_segments(payload)
+        if corrected is not None:
+            payload["segments"] = corrected[0]
         payload["instrumental_selection"] = selection
         payload.setdefault("is_duet", False)
+        outgoing_payload_top_level_keys = list(payload.keys())
+
         complete_status, complete_payload = await _upstream_json("/api/complete", method="POST", json_body=payload)
         if complete_status >= 400:
-            return JSONResponse({"ok": False, "stage": "complete", "status_code": complete_status, "error": complete_payload}, status_code=502)
-        return JSONResponse({"ok": True, "status_code": complete_status, "instrumental_selection": selection, "applied_segment_edits": applied_edits, "response": complete_payload})
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "stage": "complete",
+                    "status_code": complete_status,
+                    "error": complete_payload,
+                    "review_debug": _review_contract_debug(payload),
+                    "outgoing_payload_top_level_keys": outgoing_payload_top_level_keys,
+                    **edit_debug,
+                },
+                status_code=502,
+            )
+
+        return JSONResponse(
+            {
+                "ok": True,
+                "status_code": complete_status,
+                "instrumental_selection": selection,
+                "review_debug": _review_contract_debug(payload),
+                "outgoing_payload_top_level_keys": outgoing_payload_top_level_keys,
+                "applied_segment_edits": {
+                    "text": edit_debug["text_edit_count"],
+                    "timing": edit_debug["timing_edit_count"],
+                    "deleted": len(edit_debug["removed_indexes"]),
+                },
+                "response": complete_payload,
+                **edit_debug,
+            }
+        )
     except httpx.HTTPError as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
 
