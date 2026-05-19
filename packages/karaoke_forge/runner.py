@@ -106,6 +106,7 @@ def kill_stale_review_server(log) -> list[int]:
 def build_karaoke_gen_command(job: Job) -> list[str]:
     cmd = [
         KARAOKE_GEN_BIN,
+        "-y",
         job.source_audio_path,
         job.artist,
         job.title,
@@ -149,6 +150,7 @@ def run_job(job_id: str) -> Job:
         with log_path.open("w", encoding="utf-8") as log:
             log.write("$ " + " ".join(cmd) + "\n")
             log.write(f"[run-log] {log_path}\n")
+            log.write("[mode] karaoke-gen -y / non-interactive yes mode enabled\n")
             killed = kill_stale_review_server(log)
             if killed:
                 log.write(f"[review-port] killed stale pid(s): {killed}\n")
