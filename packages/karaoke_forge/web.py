@@ -46,6 +46,55 @@ def new_run_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
+def read_job_log(job: Job) -> str:
+    log_path = Path(job.log_path)
+    if not log_path.exists():
+        return "No log yet. Refresh after the worker starts.\n"
+    return log_path.read_text(encoding="utf-8", errors="replace")
+
+
+def tail_text(text: str, max_lines: int = 220) -> str:
+    lines = text.splitlines()
+    if len(lines) <= max_lines:
+        return text
+    return "\n".join(lines[-max_lines:]) + "\n"
+
+
+def trace_text(text: str) -> str:
+    keywords = (
+        "Traceback",
+        "ERROR",
+        "Exception",
+        "EOFError",
+        "KeyboardInterrupt",
+        "ValueError",
+        "exit_code",
+        "Confirm features",
+        "review-port",
+        "run-log",
+        "mode]",
+        "Opening review UI",
+        "finalisation",
+        "Video rendered successfully",
+        "Karaoke finalisation complete",
+        "Final Videos",
+        "Final Videos:",
+    )
+    lines = text.splitlines()
+    selected: list[str] = []
+    for idx, line in enumerate(lines):
+        if any(keyword in line for keyword in keywords):
+            start = max(0, idx - 3)
+            end = min(len(lines), idx + 16)
+            block = lines[start:end]
+            if selected and selected[-1] != "---":
+                selected.append("---")
+            selected.extend(block)
+    if not selected:
+        return tail_text(text, 160)
+    return "\n".join(selected[-500:]) + "\n"
+
+
 def page(title: str, body: str) -> HTMLResponse:
     css_url = esc(public_url("/static/style.css"))
     home_url = esc(public_url("/"))
@@ -248,6 +297,8 @@ def job_detail(job_id: str) -> HTMLResponse:
 
     raw_log_url = esc(public_url('/jobs/' + job.id + '/log/raw'))
     live_log_url = esc(public_url('/jobs/' + job.id + '/log/text'))
+    tail_log_url = esc(public_url('/jobs/' + job.id + '/log/tail'))
+    trace_log_url = esc(public_url('/jobs/' + job.id + '/log/trace'))
     body = f"""
 <section class="panel">
   <h1>{esc(job.artist)} — {esc(job.title)}</h1>
@@ -255,6 +306,8 @@ def job_detail(job_id: str) -> HTMLResponse:
   <p>
     <a class="button-link" href="{esc(public_url('/review'))}">Open Review tab</a>
     <a class="button-link" href="{raw_log_url}">Raw run log</a>
+    <a class="button-link" href="{tail_log_url}">Tail log</a>
+    <a class="button-link" href="{trace_log_url}">Trace summary</a>
   </p>
 
   <dl>
@@ -272,9 +325,18 @@ def job_detail(job_id: str) -> HTMLResponse:
   </dl>
 
   <h2>Live run log</h2>
+  <div class="button-row">
+    <button type="button" id="copy-visible-log">Copy visible log</button>
+    <button type="button" id="copy-tail-log">Copy tail</button>
+    <button type="button" id="copy-trace-log">Copy trace summary</button>
+    <span id="copy-status" class="muted"></span>
+  </div>
   <pre id="live-log" class="live-log">Loading log...</pre>
   <script>
     const logUrl = "{live_log_url}";
+    const tailUrl = "{tail_log_url}";
+    const traceUrl = "{trace_log_url}";
+
     async function refreshLog() {{
       try {{
         const response = await fetch(logUrl, {{cache: "no-store"}});
@@ -287,6 +349,23 @@ def job_detail(job_id: str) -> HTMLResponse:
         document.getElementById("live-log").textContent = "Failed to load log: " + err;
       }}
     }}
+
+    async function copyText(label, text) {{
+      await navigator.clipboard.writeText(text);
+      document.getElementById("copy-status").textContent = "Copied " + label + " (" + text.length + " chars)";
+      setTimeout(() => document.getElementById("copy-status").textContent = "", 2500);
+    }}
+
+    async function copyFromUrl(label, url) {{
+      const response = await fetch(url, {{cache: "no-store"}});
+      const text = await response.text();
+      await copyText(label, text);
+    }}
+
+    document.getElementById("copy-visible-log").addEventListener("click", () => copyText("visible log", document.getElementById("live-log").textContent));
+    document.getElementById("copy-tail-log").addEventListener("click", () => copyFromUrl("tail", tailUrl));
+    document.getElementById("copy-trace-log").addEventListener("click", () => copyFromUrl("trace summary", traceUrl));
+
     refreshLog();
     setInterval(refreshLog, 2000);
   </script>
@@ -311,12 +390,23 @@ def job_log_text(job_id: str) -> PlainTextResponse:
     job = get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
+    return PlainTextResponse(read_job_log(job))
 
-    log_path = Path(job.log_path)
-    if not log_path.exists():
-        return PlainTextResponse("No log yet. Refresh after the worker starts.\n")
 
-    return PlainTextResponse(log_path.read_text(encoding="utf-8", errors="replace"))
+@app.get("/jobs/{job_id}/log/tail", response_class=PlainTextResponse)
+def job_log_tail(job_id: str) -> PlainTextResponse:
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return PlainTextResponse(tail_text(read_job_log(job)))
+
+
+@app.get("/jobs/{job_id}/log/trace", response_class=PlainTextResponse)
+def job_log_trace(job_id: str) -> PlainTextResponse:
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return PlainTextResponse(trace_text(read_job_log(job)))
 
 
 @app.get("/jobs/{job_id}/log/raw", response_class=PlainTextResponse)
