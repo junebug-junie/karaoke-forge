@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -16,6 +18,7 @@ from .config import (
 from .store import Job, update_job
 
 PROMPT_DEFAULT_ACCEPTS = "\n" * 40
+REVIEW_SERVER_PORT = int(os.getenv("KARAOKE_REVIEW_SERVER_PORT", "8000"))
 
 
 def _now() -> str:
@@ -42,6 +45,62 @@ def _copy_render_outputs(job: Job) -> list[str]:
         shutil.copy2(candidate, target)
         copied.append(str(target))
     return copied
+
+
+def _pids_listening_on_port(port: int) -> list[int]:
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f"TCP:{port}", "-sTCP:LISTEN"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except FileNotFoundError:
+        return []
+
+    pids: list[int] = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if line.isdigit():
+            pids.append(int(line))
+    return sorted(set(pids))
+
+
+def kill_stale_review_server(log) -> list[int]:
+    pids = _pids_listening_on_port(REVIEW_SERVER_PORT)
+    if not pids:
+        log.write(f"[review-port] port {REVIEW_SERVER_PORT} is free\n")
+        log.flush()
+        return []
+
+    log.write(f"[review-port] killing stale listener(s) on port {REVIEW_SERVER_PORT}: {pids}\n")
+    log.flush()
+
+    for pid in pids:
+        if pid == os.getpid():
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        remaining = _pids_listening_on_port(REVIEW_SERVER_PORT)
+        if not remaining:
+            return pids
+        time.sleep(0.25)
+
+    remaining = _pids_listening_on_port(REVIEW_SERVER_PORT)
+    for pid in remaining:
+        if pid == os.getpid():
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    return pids
 
 
 def build_karaoke_gen_command(job: Job) -> list[str]:
@@ -83,13 +142,19 @@ def run_job(job_id: str) -> Job:
         job.id,
         status="running",
         started_at=_now(),
-        metadata={**job.metadata, "command": cmd},
+        metadata={**job.metadata, "command": cmd, "run_log_path": str(log_path)},
     )
 
     try:
-        with log_path.open("a", encoding="utf-8") as log:
-            log.write("$ " + " ".join(cmd) + "\n\n")
+        with log_path.open("w", encoding="utf-8") as log:
+            log.write("$ " + " ".join(cmd) + "\n")
+            log.write(f"[run-log] {log_path}\n")
+            killed = kill_stale_review_server(log)
+            if killed:
+                log.write(f"[review-port] killed stale pid(s): {killed}\n")
+            log.write("\n")
             log.flush()
+
             proc = subprocess.run(
                 cmd,
                 cwd=job_dir,
