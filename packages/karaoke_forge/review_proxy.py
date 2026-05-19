@@ -522,7 +522,7 @@ HTML_TEMPLATE = """<!doctype html>
       const canonicalLines = parseCanonicalLines();
       let marked = 0;
       document.querySelectorAll("tr[data-segment-index]").forEach(row => {
-        const idx = Number(row.dataset.segmentIndex);
+        const idx = Number(row.datasetSegmentIndex || row.dataset.segmentIndex);
         const deleteEl = row.querySelector("input[data-field='delete']");
         if (!deleteEl) return;
         if (idx >= canonicalLines.length) {
@@ -783,7 +783,7 @@ async def native_complete_review(request: Request, instrumental_selection: str |
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
 
 
-@router.api_route("/review-proxy/{path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+@router.api_route("/review-proxy/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
 async def review_proxy(path: str, request: Request) -> Response:
     upstream_url = f"{REVIEW_UPSTREAM}/{path}"
     if request.url.query:
