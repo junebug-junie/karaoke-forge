@@ -111,7 +111,37 @@ def align_canonical_lines_to_segments(
         else:
             line_cursor = max(line_cursor, best_line)
 
-    return aligned
+    return fill_alignment_gaps(segments, aligned)
+
+
+def fill_alignment_gaps(
+    segments: list[dict[str, Any]],
+    aligned: list[str | None],
+) -> list[str | None]:
+    """Assign canonical lines to short Whisper fragments sandwiched between matches."""
+    if not segments or not aligned:
+        return aligned
+
+    filled = list(aligned)
+    for idx, segment in enumerate(segments):
+        if filled[idx] or not isinstance(segment, dict):
+            continue
+        segment_norm = normalize_lyric_text(_segment_text_value(segment))
+        if not segment_norm:
+            continue
+
+        prev_line = filled[idx - 1] if idx > 0 else None
+        next_line = filled[idx + 1] if idx + 1 < len(filled) else None
+        if prev_line and next_line and prev_line == next_line:
+            filled[idx] = prev_line
+            continue
+
+        for neighbor in (prev_line, next_line):
+            if neighbor and segment_norm in normalize_lyric_text(neighbor):
+                filled[idx] = neighbor
+                break
+
+    return filled
 
 
 def tail_junk_segment_indexes(

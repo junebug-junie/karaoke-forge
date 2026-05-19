@@ -37,3 +37,16 @@ def test_tail_junk_skips_unaligned_segment_that_matches_canonical():
     ]
     canonical = ["line a", "line b real"]
     assert tail_junk_segment_indexes(aligned, segments, canonical) == []
+
+
+def test_fill_alignment_gaps_inherits_neighbor_canonical_line():
+    segments = [
+        {"text": "With the beating"},
+        {"text": "Of all"},
+        {"text": "These idiot hearts"},
+    ]
+    canonical = ["With the beating of all these idiot hearts"]
+    aligned = align_canonical_lines_to_segments(segments, canonical)
+    assert aligned[0] == canonical[0]
+    assert aligned[1] == canonical[0]
+    assert aligned[2] == canonical[0]
