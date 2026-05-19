@@ -10,6 +10,16 @@ def _initial_root_dir() -> Path:
     return Path(os.getenv("KARAOKE_FORGE_ROOT", Path.cwd())).resolve()
 
 
+def _int_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return int(value.strip())
+    except ValueError:
+        return default
+
+
 ROOT_DIR = _initial_root_dir()
 ENV_LOCAL_PATH = ROOT_DIR / ".env.local"
 ENV_EXAMPLE_PATH = ROOT_DIR / ".env.example"
@@ -39,6 +49,12 @@ KARAOKE_GEN_BIN = os.getenv("KARAOKE_GEN_BIN", "karaoke-gen")
 WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "medium")
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cuda")
 ENABLE_LOCAL_WHISPER = os.getenv("ENABLE_LOCAL_WHISPER", "true")
+
+# Indie-karaoke-safe defaults. Clean instrumental avoids unstable lead-vocal
+# leakage from backing-vocal stems, and +300ms compensates for highlights that
+# tend to fire slightly early after Whisper alignment.
+DEFAULT_INSTRUMENTAL_SELECTION = os.getenv("KARAOKE_DEFAULT_INSTRUMENTAL_SELECTION", "clean").strip() or "clean"
+DEFAULT_SUBTITLE_OFFSET_MS = _int_env("KARAOKE_DEFAULT_SUBTITLE_OFFSET_MS", 300)
 
 
 def ensure_library_dirs() -> None:
