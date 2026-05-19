@@ -21,6 +21,18 @@ HOP_BY_HOP_HEADERS = {
     "transfer-encoding",
     "upgrade",
 }
+ABSOLUTE_REVIEW_PREFIXES = (
+    "/_next/",
+    "/api/",
+    "/app/",
+    "/assets/",
+    "/audio/",
+    "/files/",
+    "/images/",
+    "/lyrics/",
+    "/media/",
+    "/static/",
+)
 
 
 def public_url(path: str = "/") -> str:
@@ -61,6 +73,14 @@ def rewrite_body(content: bytes, content_type: str) -> bytes:
 
     for old, new in replacements.items():
         text = text.replace(old, new)
+
+    # Next.js client bundles often call fetch('/api/...') or refer to absolute
+    # '/_next/...' paths from JavaScript. Those do not appear as href/src attrs,
+    # so rewrite common quoted absolute route prefixes too.
+    for absolute_prefix in ABSOLUTE_REVIEW_PREFIXES:
+        proxied_prefix = prefix + absolute_prefix
+        for quote in ('"', "'", "`"):
+            text = text.replace(f"{quote}{absolute_prefix}", f"{quote}{proxied_prefix}")
 
     return text.encode("utf-8")
 
