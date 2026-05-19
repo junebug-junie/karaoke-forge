@@ -21,10 +21,11 @@ from .config import (
 )
 from .store import Job, update_job
 
-PROMPT_DEFAULT_ACCEPTS = "\n" * 40
 REVIEW_SERVER_PORT = int(os.getenv("KARAOKE_REVIEW_SERVER_PORT", "8000"))
 VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".webm", ".avi"}
 COPY_ALL_RENDER_OUTPUTS = os.getenv("KARAOKE_FORGE_COPY_ALL_RENDER_OUTPUTS", "").strip().lower() in {"1", "true", "yes", "on"}
+AUTO_ADVANCE_STDIN = os.getenv("KARAOKE_FORGE_AUTO_ADVANCE_STDIN", "").strip().lower() in {"1", "true", "yes", "on"}
+PROMPT_DEFAULT_ACCEPTS = "\n" * 40
 
 
 def _now() -> str:
@@ -297,11 +298,12 @@ def run_job(job_id: str) -> Job:
         with log_path.open("w", encoding="utf-8") as log:
             log.write("$ " + " ".join(cmd) + "\n")
             log.write(f"[run-log] {log_path}\n")
-            log.write("[mode] karaoke-gen -y / non-interactive yes mode enabled\n")
+            log.write("[mode] karaoke-gen -y mode enabled; Forge holds stdin open for review completion\n")
             log.write(f"[models] whisper_model_size={WHISPER_MODEL_SIZE} spacy_model={SPACY_MODEL}\n")
             log.write(f"[defaults] instrumental_selection={DEFAULT_INSTRUMENTAL_SELECTION} subtitle_offset_ms={DEFAULT_SUBTITLE_OFFSET_MS}\n")
             log.write(f"[patch] karaoke_gen_output_config=enabled pythonpath_root={ROOT_DIR}\n")
             log.write(f"[run-dir] {run_dir}\n")
+            log.write(f"[stdin] auto_advance={AUTO_ADVANCE_STDIN}\n")
             log.write(f"[renders] copy_all_render_outputs={COPY_ALL_RENDER_OUTPUTS}\n")
             killed = kill_stale_review_server(log)
             if killed:
@@ -309,17 +311,34 @@ def run_job(job_id: str) -> Job:
             log.write("\n")
             log.flush()
 
-            proc = subprocess.run(
-                cmd,
-                cwd=run_dir,
-                env=build_environment(),
-                input=PROMPT_DEFAULT_ACCEPTS,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                text=True,
-                check=False,
-            )
-            log.write(f"\n\n[exit_code] {proc.returncode}\n")
+            if AUTO_ADVANCE_STDIN:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=run_dir,
+                    env=build_environment(),
+                    input=PROMPT_DEFAULT_ACCEPTS,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    check=False,
+                )
+                returncode = proc.returncode
+            else:
+                # Do not feed blank lines into karaoke-gen. Feeding newlines here
+                # can accept the review prompt/default correction state before
+                # the Forge review UI has a chance to mutate corrected_segments.
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=run_dir,
+                    env=build_environment(),
+                    stdin=subprocess.PIPE,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+                returncode = proc.wait()
+
+            log.write(f"\n\n[exit_code] {returncode}\n")
 
         latest = get_job(job.id)
         metadata = latest.metadata if latest else job.metadata
@@ -327,10 +346,11 @@ def run_job(job_id: str) -> Job:
         copied_outputs, render_debug = _copy_render_outputs(latest or job, render_source_dir, log_path)
         metadata = {
             **metadata,
-            "returncode": proc.returncode,
+            "returncode": returncode,
             "render_outputs": copied_outputs,
             "render_source_dir": str(render_source_dir),
             "render_discovery": render_debug,
+            "auto_advance_stdin": AUTO_ADVANCE_STDIN,
         }
 
         with log_path.open("a", encoding="utf-8") as log:
@@ -342,12 +362,12 @@ def run_job(job_id: str) -> Job:
             for copied in copied_outputs:
                 log.write(f"[renders] copied {copied}\n")
 
-        if proc.returncode != 0:
+        if returncode != 0:
             return update_job(
                 job.id,
                 status="failed",
                 finished_at=_now(),
-                error=f"karaoke-gen exited with {proc.returncode}; see log",
+                error=f"karaoke-gen exited with {returncode}; see log",
                 metadata=metadata,
             )
 
