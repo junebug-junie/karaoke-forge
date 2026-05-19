@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Iterable
 
 from .config import (
+    DEFAULT_INSTRUMENTAL_SELECTION,
+    DEFAULT_SUBTITLE_OFFSET_MS,
     ENABLE_LOCAL_WHISPER,
     KARAOKE_GEN_BIN,
     WHISPER_DEVICE,
@@ -112,6 +114,8 @@ def build_karaoke_gen_command(job: Job) -> list[str]:
         job.title,
         "--log_level",
         "debug",
+        "--subtitle_offset_ms",
+        str(DEFAULT_SUBTITLE_OFFSET_MS),
     ]
     if job.lyrics_path:
         cmd.extend(["--lyrics_file", job.lyrics_path])
@@ -123,6 +127,8 @@ def build_environment() -> dict[str, str]:
     env.setdefault("WHISPER_MODEL_SIZE", WHISPER_MODEL_SIZE)
     env.setdefault("WHISPER_DEVICE", WHISPER_DEVICE)
     env.setdefault("ENABLE_LOCAL_WHISPER", ENABLE_LOCAL_WHISPER)
+    env.setdefault("KARAOKE_DEFAULT_INSTRUMENTAL_SELECTION", DEFAULT_INSTRUMENTAL_SELECTION)
+    env.setdefault("KARAOKE_DEFAULT_SUBTITLE_OFFSET_MS", str(DEFAULT_SUBTITLE_OFFSET_MS))
     return env
 
 
@@ -151,6 +157,7 @@ def run_job(job_id: str) -> Job:
             log.write("$ " + " ".join(cmd) + "\n")
             log.write(f"[run-log] {log_path}\n")
             log.write("[mode] karaoke-gen -y / non-interactive yes mode enabled\n")
+            log.write(f"[defaults] instrumental_selection={DEFAULT_INSTRUMENTAL_SELECTION} subtitle_offset_ms={DEFAULT_SUBTITLE_OFFSET_MS}\n")
             killed = kill_stale_review_server(log)
             if killed:
                 log.write(f"[review-port] killed stale pid(s): {killed}\n")
