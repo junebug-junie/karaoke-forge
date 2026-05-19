@@ -473,7 +473,7 @@ HTML_TEMPLATE = """<!doctype html>
         completionRequested = true;
         const counts = payload.applied_segment_edits || {};
         setStatus("review submitted — waiting for karaoke-gen to finalise", "done");
-        nativeEl.insertAbjacentHTML("afterbegin", `<p class="status done">Review accepted with instrumental <code>${escapeHtml(selection)}</code>; text edits: ${counts.text || 0}, timing edits: ${counts.timing || 0}, deleted: ${counts.deleted || 0}. Watch the job log for final render.</p>`);
+        nativeEl.insertAdjacentHTML("afterbegin", `<p class="status done">Review accepted with instrumental <code>${escapeHtml(selection)}</code>; text edits: ${counts.text || 0}, timing edits: ${counts.timing || 0}, deleted: ${counts.deleted || 0}. Watch the job log for final render.</p>`);
       } catch (err) {
         nativeEl.insertAdjacentHTML("afterbegin", `<p class="error">Finish failed: ${escapeHtml(err)}</p>`);
       } finally {
