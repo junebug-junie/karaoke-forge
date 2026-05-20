@@ -8,7 +8,14 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
-from .config import DEFAULT_INSTRUMENTAL_SELECTION, DEFAULT_SUBTITLE_OFFSET_MS, PUBLIC_BASE_PATH, ROOT_DIR
+from .config import (
+    DEFAULT_INSTRUMENTAL_SELECTION,
+    DEFAULT_SUBTITLE_OFFSET_MS,
+    ENABLE_VOCAL_TIMING_REFINE,
+    PUBLIC_BASE_PATH,
+    ROOT_DIR,
+)
+from .vocal_timing import find_vocal_stem_path, refine_segment_word_timings
 from .job_lifecycle import active_review_job, get_active_job_id
 from .store import get_job
 from .review_alignment import (
@@ -1208,6 +1215,18 @@ async def native_complete_review(request: Request, instrumental_selection: str |
         if canonical_lines:
             tail_indexes = tail_junk_segment_indexes(aligned, corrected_segments, canonical_lines)
         trim_debug = _delete_corrected_segment_indexes(payload, tail_indexes) if tail_indexes else {"tail_trimmed": 0}
+        vocal_timing_debug: dict[str, Any] = {"vocal_timing_refined": False}
+        if ENABLE_VOCAL_TIMING_REFINE and active_job_id:
+            job = get_job(active_job_id)
+            vocal_path = find_vocal_stem_path(job)
+            corrected_for_vocal = _find_corrected_segments(payload)
+            if vocal_path and corrected_for_vocal:
+                segment_list, _path = corrected_for_vocal
+                refine_segment_word_timings(_extract_segment_dicts(segment_list), vocal_path)
+                vocal_timing_debug = {
+                    "vocal_timing_refined": True,
+                    "vocal_stem_path": str(vocal_path),
+                }
         words_resynced = _resync_all_segment_words(
             payload,
             force_indexes=set(edit_debug.get("text_edited_indexes") or []),
@@ -1258,6 +1277,7 @@ async def native_complete_review(request: Request, instrumental_selection: str |
             "tail_trimmed": trim_debug.get("tail_trimmed", 0),
             "words_resynced": words_resynced,
             "outgoing_payload_top_level_keys": outgoing_payload_top_level_keys,
+            **vocal_timing_debug,
         }
         mark_review_complete(
             {

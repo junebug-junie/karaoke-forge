@@ -20,6 +20,13 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _bool_env(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
 ROOT_DIR = _initial_root_dir()
 ENV_LOCAL_PATH = ROOT_DIR / ".env.local"
 ENV_EXAMPLE_PATH = ROOT_DIR / ".env.example"
@@ -59,6 +66,14 @@ SPACY_MODEL = os.getenv("SPACY_MODEL", "en_core_web_md")
 # tend to fire slightly early after Whisper alignment.
 DEFAULT_INSTRUMENTAL_SELECTION = os.getenv("KARAOKE_DEFAULT_INSTRUMENTAL_SELECTION", "clean").strip() or "clean"
 DEFAULT_SUBTITLE_OFFSET_MS = _int_env("KARAOKE_DEFAULT_SUBTITLE_OFFSET_MS", 500)
+
+# Optional vocal-stem envelope refinement for per-word timings at review complete.
+ENABLE_VOCAL_TIMING_REFINE = _bool_env("KARAOKE_FORGE_VOCAL_TIMING", False)
+VOCAL_TIMING_FRAME_MS = _int_env("KARAOKE_FORGE_VOCAL_TIMING_FRAME_MS", 50)
+VOCAL_TIMING_SNAP_MS = _int_env("KARAOKE_FORGE_VOCAL_TIMING_SNAP_MS", 150)
+VOCAL_TIMING_MAX_DRIFT_MS = _int_env("KARAOKE_FORGE_VOCAL_TIMING_MAX_DRIFT_MS", 200)
+VOCAL_TIMING_SNAP_SEC = VOCAL_TIMING_SNAP_MS / 1000.0
+VOCAL_TIMING_MAX_DRIFT_SEC = VOCAL_TIMING_MAX_DRIFT_MS / 1000.0
 
 
 def ensure_library_dirs() -> None:
