@@ -1005,6 +1005,7 @@ HTML_TEMPLATE = """<!doctype html>
         <div class="debug-summary"><strong>Contract:</strong> display source <code>${escapeHtml(debug.display_segments_source_key || "none")}</code>, relation <code>${escapeHtml(debug.display_segments_relation || "unknown")}</code></div>
         <div class="debug-summary"><strong>Canonical lyrics:</strong> <code>${escapeHtml(effectiveCanonicalLines().length)}</code> line(s) from <code>${escapeHtml(canonicalSource)}</code></div>
         ${tailJunkCount ? `<p class="status queued"><code>${tailJunkCount}</code> outro junk row(s) detected after the last matched lyric; use <strong>Remove outro junk rows</strong> or Finish will drop them.</p>` : ""}
+        ${alignment.aligned_segment_count === 0 && effectiveCanonicalLines().length ? `<p class="status failed"><strong>Whisper text does not match your lyrics.</strong> Canonical preview is empty because no segment matched <code>lyrics.txt</code>. If you recently set <code>WHISPER_LANGUAGE=en</code>, delete both <code>*_raw.json</code> and <code>*_converted.json</code> whisper cache files for this audio (cache keys did not include language until now) and re-run the job.</p>` : ""}
         <h3>Instrumental options</h3>
         ${inst}
         <h3>Lyric segments</h3>

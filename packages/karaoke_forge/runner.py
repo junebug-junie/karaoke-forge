@@ -19,6 +19,7 @@ from .config import (
     ROOT_DIR,
     SPACY_MODEL,
     WHISPER_DEVICE,
+    WHISPER_LANGUAGE,
     WHISPER_MODEL_SIZE,
 )
 from .store import Job, update_job
@@ -262,6 +263,7 @@ def build_environment() -> dict[str, str]:
     env = os.environ.copy()
     env.setdefault("WHISPER_MODEL_SIZE", WHISPER_MODEL_SIZE)
     env.setdefault("WHISPER_DEVICE", WHISPER_DEVICE)
+    env.setdefault("WHISPER_LANGUAGE", WHISPER_LANGUAGE)
     env.setdefault("ENABLE_LOCAL_WHISPER", ENABLE_LOCAL_WHISPER)
     env.setdefault("SPACY_MODEL", SPACY_MODEL)
     env.setdefault("KARAOKE_DEFAULT_INSTRUMENTAL_SELECTION", DEFAULT_INSTRUMENTAL_SELECTION)
@@ -325,7 +327,7 @@ def _run_job_body(job: Job) -> Job:
             log.write("$ " + " ".join(cmd) + "\n")
             log.write(f"[run-log] {log_path}\n")
             log.write("[mode] karaoke-gen -y mode enabled; Forge holds stdin open for review completion\n")
-            log.write(f"[models] whisper_model_size={WHISPER_MODEL_SIZE} spacy_model={SPACY_MODEL}\n")
+            log.write(f"[models] whisper_model_size={WHISPER_MODEL_SIZE} whisper_language={WHISPER_LANGUAGE} spacy_model={SPACY_MODEL}\n")
             log.write(f"[defaults] instrumental_selection={DEFAULT_INSTRUMENTAL_SELECTION} subtitle_offset_ms={DEFAULT_SUBTITLE_OFFSET_MS}\n")
             log.write(
                 f"[patch] vendor_karaoke_gen={ROOT_DIR / 'vendor' / 'karaoke-gen'} "

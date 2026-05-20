@@ -58,6 +58,9 @@ KARAOKE_GEN_BIN = os.getenv("KARAOKE_GEN_BIN", "karaoke-gen")
 # large-v3, not the Hugging Face identifier openai/whisper-large-v3.
 WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "large-v3")
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cuda")
+# Force English by default. Auto-detect can hallucinate Welsh/other languages on
+# slow, reverb-heavy vocals (e.g. Cigarettes After Sex).
+WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "en").strip() or "en"
 ENABLE_LOCAL_WHISPER = os.getenv("ENABLE_LOCAL_WHISPER", "true")
 SPACY_MODEL = os.getenv("SPACY_MODEL", "en_core_web_md")
 
