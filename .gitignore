@@ -11,4 +11,5 @@ library/*.sqlite3-*
 
 .env
 .env.*
+.worktrees/
 .DS_Store

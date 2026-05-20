@@ -5,6 +5,7 @@ torchvision==0.21.0+cu124
 torchaudio==2.6.0+cu124
 triton==3.2.0
 
-karaoke-gen
+# karaoke-gen: install from vendor, not PyPI (see scripts/dev_setup.sh):
+#   pip install -e "./vendor/karaoke-gen[local-whisper]"
 whisper-timestamped
 spacy

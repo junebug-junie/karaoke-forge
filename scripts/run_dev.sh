@@ -5,6 +5,9 @@ cd "$(dirname "$0")/.."
 
 source .venv/bin/activate
 
+# Patched karaoke-gen lives in vendor/; karaoke-gen subprocesses get this via runner too.
+export PYTHONPATH="${PWD}/vendor/karaoke-gen:${PWD}${PYTHONPATH:+:${PYTHONPATH}}"
+
 APP_MODULE="${APP_MODULE:-packages.karaoke_forge.guarded_app:app}"
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8790}"

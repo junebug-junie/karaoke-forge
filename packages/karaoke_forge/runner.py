@@ -13,14 +13,18 @@ from .config import (
     DEFAULT_INSTRUMENTAL_SELECTION,
     DEFAULT_SUBTITLE_OFFSET_MS,
     ENABLE_LOCAL_WHISPER,
+    ENABLE_VOCAL_TIMING_REFINE,
+    ENABLE_VOCAL_VISUALIZER,
     KARAOKE_GEN_BIN,
     ROOT_DIR,
     SPACY_MODEL,
     WHISPER_DEVICE,
+    WHISPER_LANGUAGE,
     WHISPER_MODEL_SIZE,
 )
 from .store import Job, update_job
 from .review_contract import review_gate_decision
+from .vocal_visualizer import apply_vocal_visualizer_to_render_paths
 
 REVIEW_SERVER_PORT = int(os.getenv("KARAOKE_REVIEW_SERVER_PORT", "8000"))
 VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".webm", ".avi"}
@@ -259,17 +263,20 @@ def build_environment() -> dict[str, str]:
     env = os.environ.copy()
     env.setdefault("WHISPER_MODEL_SIZE", WHISPER_MODEL_SIZE)
     env.setdefault("WHISPER_DEVICE", WHISPER_DEVICE)
+    env.setdefault("WHISPER_LANGUAGE", WHISPER_LANGUAGE)
     env.setdefault("ENABLE_LOCAL_WHISPER", ENABLE_LOCAL_WHISPER)
     env.setdefault("SPACY_MODEL", SPACY_MODEL)
     env.setdefault("KARAOKE_DEFAULT_INSTRUMENTAL_SELECTION", DEFAULT_INSTRUMENTAL_SELECTION)
     env.setdefault("KARAOKE_DEFAULT_SUBTITLE_OFFSET_MS", str(DEFAULT_SUBTITLE_OFFSET_MS))
     env.setdefault("KARAOKE_FORGE_PATCH_KARAOKE_GEN", "1")
 
-    # Make sitecustomize.py in the Forge repo visible to the karaoke-gen
-    # subprocess even though each job runs from its own library/jobs/... cwd.
+    # Prefer vendor/karaoke-gen (Forge patches) over pip site-packages, and load
+    # sitecustomize.py from the Forge repo root in karaoke-gen subprocesses.
     existing_pythonpath = env.get("PYTHONPATH", "")
     root = str(ROOT_DIR)
-    env["PYTHONPATH"] = root if not existing_pythonpath else f"{root}:{existing_pythonpath}"
+    vendor_kg = str(ROOT_DIR / "vendor" / "karaoke-gen")
+    prefix = f"{vendor_kg}:{root}"
+    env["PYTHONPATH"] = prefix if not existing_pythonpath else f"{prefix}:{existing_pythonpath}"
     return env
 
 
@@ -320,9 +327,12 @@ def _run_job_body(job: Job) -> Job:
             log.write("$ " + " ".join(cmd) + "\n")
             log.write(f"[run-log] {log_path}\n")
             log.write("[mode] karaoke-gen -y mode enabled; Forge holds stdin open for review completion\n")
-            log.write(f"[models] whisper_model_size={WHISPER_MODEL_SIZE} spacy_model={SPACY_MODEL}\n")
+            log.write(f"[models] whisper_model_size={WHISPER_MODEL_SIZE} whisper_language={WHISPER_LANGUAGE} spacy_model={SPACY_MODEL}\n")
             log.write(f"[defaults] instrumental_selection={DEFAULT_INSTRUMENTAL_SELECTION} subtitle_offset_ms={DEFAULT_SUBTITLE_OFFSET_MS}\n")
-            log.write(f"[patch] karaoke_gen_output_config=enabled pythonpath_root={ROOT_DIR}\n")
+            log.write(
+                f"[patch] vendor_karaoke_gen={ROOT_DIR / 'vendor' / 'karaoke-gen'} "
+                f"vocal_timing={ENABLE_VOCAL_TIMING_REFINE} vocal_visualizer={ENABLE_VOCAL_VISUALIZER}\n"
+            )
             log.write(f"[run-dir] {run_dir}\n")
             log.write(f"[stdin] auto_advance={AUTO_ADVANCE_STDIN}\n")
             log.write(f"[renders] copy_all_render_outputs={COPY_ALL_RENDER_OUTPUTS}\n")
@@ -396,6 +406,17 @@ def _run_job_body(job: Job) -> Job:
             )
 
         copied_outputs, render_debug = _copy_render_outputs(latest or job, render_source_dir, log_path)
+        if ENABLE_VOCAL_VISUALIZER and copied_outputs:
+            copied_outputs, vocal_viz_debug = apply_vocal_visualizer_to_render_paths(
+                latest or job,
+                copied_outputs,
+            )
+            render_debug = {**render_debug, **vocal_viz_debug}
+            with log_path.open("a", encoding="utf-8") as log:
+                log.write(
+                    f"[vocal-visualizer] enabled applied={vocal_viz_debug.get('vocal_visualizer_applied')} "
+                    f"paths={vocal_viz_debug.get('vocal_visualizer_paths', [])}\n"
+                )
         metadata = {
             **metadata,
             "returncode": returncode,

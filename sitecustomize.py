@@ -1,6 +1,21 @@
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
+
+
+def _prepend_vendor_karaoke_gen() -> None:
+    """Prefer Forge's patched vendor/karaoke-gen over pip site-packages."""
+    vendor = Path(__file__).resolve().parent / "vendor" / "karaoke-gen"
+    if not vendor.is_dir():
+        return
+    vendor_str = str(vendor)
+    if vendor_str not in sys.path:
+        sys.path.insert(0, vendor_str)
+
+
+_prepend_vendor_karaoke_gen()
 
 
 def _patch_karaoke_gen_output_config() -> None:

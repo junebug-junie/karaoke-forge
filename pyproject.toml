@@ -14,9 +14,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# karaoke-gen itself is installed from vendor/ (see scripts/dev_setup.sh), not PyPI.
+# That keeps Forge patches in vendor/karaoke-gen as the single source of truth.
 generator = [
-  "karaoke-gen[local-whisper]",
-  "whisper-timestamped"
+  "whisper-timestamped",
 ]
 dev = [
   "pytest>=8.0.0"

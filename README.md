@@ -37,6 +37,8 @@ chmod +x scripts/*.sh
 ./scripts/dev_setup.sh
 ```
 
+`dev_setup.sh` installs **karaoke-gen from `vendor/karaoke-gen` in editable mode**, not from PyPI. Forge patches (inline lead-in, etc.) live in that submodule; a separate `pip install karaoke-gen` would shadow them.
+
 The setup script writes `.env.local` with Atlas-friendly defaults:
 
 ```bash
@@ -69,6 +71,7 @@ From the UI you can upload an audio file, add artist/title, paste lyrics, and qu
 source .venv/bin/activate
 python -m pytest
 which karaoke-gen
+python -c "import karaoke_gen; print(karaoke_gen.__file__)"  # should be under vendor/karaoke-gen
 karaoke-gen --help | head -n 40
 ffmpeg -version | head -n 3
 nvidia-smi
