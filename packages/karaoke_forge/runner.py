@@ -13,6 +13,7 @@ from .config import (
     DEFAULT_INSTRUMENTAL_SELECTION,
     DEFAULT_SUBTITLE_OFFSET_MS,
     ENABLE_LOCAL_WHISPER,
+    ENABLE_VOCAL_VISUALIZER,
     KARAOKE_GEN_BIN,
     ROOT_DIR,
     SPACY_MODEL,
@@ -21,6 +22,7 @@ from .config import (
 )
 from .store import Job, update_job
 from .review_contract import review_gate_decision
+from .vocal_visualizer import apply_vocal_visualizer_to_render_paths
 
 REVIEW_SERVER_PORT = int(os.getenv("KARAOKE_REVIEW_SERVER_PORT", "8000"))
 VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".webm", ".avi"}
@@ -396,6 +398,17 @@ def _run_job_body(job: Job) -> Job:
             )
 
         copied_outputs, render_debug = _copy_render_outputs(latest or job, render_source_dir, log_path)
+        if ENABLE_VOCAL_VISUALIZER and copied_outputs:
+            copied_outputs, vocal_viz_debug = apply_vocal_visualizer_to_render_paths(
+                latest or job,
+                copied_outputs,
+            )
+            render_debug = {**render_debug, **vocal_viz_debug}
+            with log_path.open("a", encoding="utf-8") as log:
+                log.write(
+                    f"[vocal-visualizer] enabled applied={vocal_viz_debug.get('vocal_visualizer_applied')} "
+                    f"paths={vocal_viz_debug.get('vocal_visualizer_paths', [])}\n"
+                )
         metadata = {
             **metadata,
             "returncode": returncode,

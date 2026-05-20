@@ -75,6 +75,9 @@ VOCAL_TIMING_MAX_DRIFT_MS = _int_env("KARAOKE_FORGE_VOCAL_TIMING_MAX_DRIFT_MS", 
 VOCAL_TIMING_SNAP_SEC = VOCAL_TIMING_SNAP_MS / 1000.0
 VOCAL_TIMING_MAX_DRIFT_SEC = VOCAL_TIMING_MAX_DRIFT_MS / 1000.0
 
+# Optional semi-transparent vocal activity bar on final rendered video (ffmpeg).
+ENABLE_VOCAL_VISUALIZER = _bool_env("KARAOKE_FORGE_VOCAL_VISUALIZER", False)
+
 
 def ensure_library_dirs() -> None:
     for path in (LIBRARY_DIR, SONGS_DIR, JOBS_DIR, RENDERS_DIR):
