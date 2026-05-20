@@ -223,25 +223,132 @@ def _segment_words_text(segment: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
-def _resync_segment_words_to_text(segment: dict[str, Any], *, force: bool = False) -> bool:
-    """karaoke-gen ASS karaoke uses segment.words; keep them aligned with segment.text."""
-    text = _segment_text(segment).strip()
-    if not text:
+def _word_time(word: dict[str, Any], key: str, fallback: float) -> float:
+    value = word.get(key)
+    if value is None:
+        return fallback
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _scale_segment_words_timing(segment: dict[str, Any], new_start: float, new_end: float) -> bool:
+    """Scale word start/end times proportionally when only segment bounds change."""
+    words = segment.get("words")
+    if not isinstance(words, list) or not words:
         return False
 
-    start = _segment_time(segment, SEGMENT_START_KEYS) or 0.0
-    end = _segment_time(segment, SEGMENT_END_KEYS) or start
-    if not force and _segment_words_text(segment).strip() == text:
-        words = segment.get("words")
-        if (
-            isinstance(words, list)
-            and len(words) == 1
-            and isinstance(words[0], dict)
-            and words[0].get("start_time") == start
-            and words[0].get("end_time") == end
-        ):
-            return False
-    words = segment.get("words")
+    valid_words = [word for word in words if isinstance(word, dict)]
+    if not valid_words:
+        return False
+
+    old_starts = [_word_time(word, "start_time", new_start) for word in valid_words]
+    old_ends = [_word_time(word, "end_time", new_end) for word in valid_words]
+    old_start = min(old_starts)
+    old_end = max(old_ends)
+    old_duration = old_end - old_start
+    new_duration = new_end - new_start
+    if new_duration <= 0:
+        return False
+
+    if old_duration <= 0:
+        chunk = new_duration / len(valid_words)
+        for index, word in enumerate(valid_words):
+            word["start_time"] = round(new_start + index * chunk, 3)
+            word["end_time"] = round(new_start + (index + 1) * chunk, 3)
+        return True
+
+    for word in valid_words:
+        word_start = _word_time(word, "start_time", old_start)
+        word_end = _word_time(word, "end_time", old_end)
+        word["start_time"] = round(new_start + (word_start - old_start) / old_duration * new_duration, 3)
+        word["end_time"] = round(new_start + (word_end - old_start) / old_duration * new_duration, 3)
+    return True
+
+
+def _word_template_from(segment: dict[str, Any], words: list[Any], index: int) -> dict[str, Any]:
+    template: dict[str, Any] = {}
+    source: dict[str, Any] | None = None
+    if index < len(words) and isinstance(words[index], dict):
+        source = words[index]
+    elif words and isinstance(words[0], dict):
+        source = words[0]
+    if source is None:
+        return template
+    segment_id = segment.get("id", "seg")
+    template["id"] = str(source.get("id") or f"{segment_id}:w{index}")
+    for key in ("confidence", "created_during_correction", "singer"):
+        if key in source:
+            template[key] = source[key]
+    return template
+
+
+def _redistribute_segment_words_for_text(
+    segment: dict[str, Any],
+    text: str,
+    start: float,
+    end: float,
+    words: list[Any] | None,
+) -> bool:
+    """When segment text changes, rebuild words from whitespace tokens.
+
+    Prefer proportional redistribution using existing word durations when the
+    token count matches the prior word count; otherwise equal-split the segment.
+    """
+    tokens = text.split()
+    if not tokens:
+        return False
+
+    old_words = [word for word in words if isinstance(word, dict)] if isinstance(words, list) else []
+    duration = max(end - start, 0.0)
+    if duration <= 0 and len(tokens) == 1:
+        duration = 0.0
+
+    new_words: list[dict[str, Any]] = []
+    if len(tokens) == len(old_words) and old_words:
+        old_durations = [
+            max(_word_time(word, "end_time", end) - _word_time(word, "start_time", start), 0.0)
+            for word in old_words
+        ]
+        total_old = sum(old_durations) or float(len(old_words))
+        cursor = start
+        for index, (token, old_duration) in enumerate(zip(tokens, old_durations)):
+            word_duration = duration * (old_duration / total_old)
+            new_words.append(
+                {
+                    "text": token,
+                    "start_time": round(cursor, 3),
+                    "end_time": round(cursor + word_duration, 3),
+                    **_word_template_from(segment, old_words, index),
+                }
+            )
+            cursor += word_duration
+    else:
+        chunk = duration / len(tokens) if tokens else 0.0
+        for index, token in enumerate(tokens):
+            word_start = start + index * chunk
+            word_end = start + (index + 1) * chunk
+            new_words.append(
+                {
+                    "text": token,
+                    "start_time": round(word_start, 3),
+                    "end_time": round(word_end, 3),
+                    **_word_template_from(segment, old_words, index),
+                }
+            )
+
+    segment["words"] = new_words
+    return True
+
+
+def _collapse_segment_to_single_word(
+    segment: dict[str, Any],
+    text: str,
+    start: float,
+    end: float,
+    words: list[Any] | None,
+) -> bool:
     template: dict[str, Any] = {}
     word_id = f"{segment.get('id', 'seg')}:w0"
     if isinstance(words, list) and words and isinstance(words[0], dict):
@@ -260,6 +367,38 @@ def _resync_segment_words_to_text(segment: dict[str, Any], *, force: bool = Fals
         }
     ]
     return True
+
+
+def _resync_segment_words_to_text(segment: dict[str, Any], *, force: bool = False) -> bool:
+    """karaoke-gen ASS karaoke uses segment.words; keep them aligned with segment.text."""
+    text = _segment_text(segment).strip()
+    if not text:
+        return False
+
+    start = _segment_time(segment, SEGMENT_START_KEYS) or 0.0
+    end = _segment_time(segment, SEGMENT_END_KEYS) or start
+    words = segment.get("words")
+    words_text = _segment_words_text(segment).strip()
+
+    if not force and words_text == text:
+        if isinstance(words, list) and len(words) > 1:
+            return False
+        if (
+            isinstance(words, list)
+            and len(words) == 1
+            and isinstance(words[0], dict)
+            and words[0].get("start_time") == start
+            and words[0].get("end_time") == end
+        ):
+            return False
+
+    if words_text != text:
+        return _redistribute_segment_words_for_text(segment, text, start, end, words if isinstance(words, list) else None)
+
+    if isinstance(words, list) and len(words) > 1:
+        return _scale_segment_words_timing(segment, start, end)
+
+    return _collapse_segment_to_single_word(segment, text, start, end, words if isinstance(words, list) else None)
 
 
 def _set_segment_text(segment: dict[str, Any], text: str) -> bool:
@@ -308,7 +447,9 @@ def _apply_text_and_timing(segment: dict[str, Any], edit: dict[str, Any]) -> tup
             timing_edits += 1
 
     if timing_edits:
-        _resync_segment_words_to_text(segment, force=True)
+        segment_start = _segment_time(segment, SEGMENT_START_KEYS) or 0.0
+        segment_end = _segment_time(segment, SEGMENT_END_KEYS) or segment_start
+        _scale_segment_words_timing(segment, segment_start, segment_end)
 
     return text_edits, timing_edits
 
@@ -335,6 +476,7 @@ def _apply_segment_edits_to_corrected_segments(data: Any, edits: Any) -> dict[st
             "skipped_indexes": [],
             "text_edit_count": 0,
             "timing_edit_count": 0,
+            "text_edited_indexes": [],
             "corrections_updated": 0,
             "corrections_path": None,
         }
@@ -354,6 +496,7 @@ def _apply_segment_edits_to_corrected_segments(data: Any, edits: Any) -> dict[st
         "skipped_indexes": [],
         "text_edit_count": 0,
         "timing_edit_count": 0,
+        "text_edited_indexes": [],
         "corrections_updated": 0,
         "corrections_path": corrections_path,
     }
@@ -382,6 +525,8 @@ def _apply_segment_edits_to_corrected_segments(data: Any, edits: Any) -> dict[st
         text_count, timing_count = _apply_text_and_timing(segment, edit)
         result["text_edit_count"] += text_count
         result["timing_edit_count"] += timing_count
+        if text_count:
+            result["text_edited_indexes"].append(idx)
 
         if corrections_list is not None and isinstance(corrections_list[idx], dict):
             correction_text, correction_timing = _apply_text_and_timing(corrections_list[idx], edit)
@@ -404,13 +549,14 @@ def _apply_segment_edits_to_corrected_segments(data: Any, edits: Any) -> dict[st
     return result
 
 
-def _resync_all_segment_words(data: Any) -> int:
+def _resync_all_segment_words(data: Any, *, force_indexes: set[int] | None = None) -> int:
     corrected = _find_corrected_segments(data)
     if corrected is None:
         return 0
+    force_indexes = force_indexes or set()
     resynced = 0
-    for segment in corrected[0]:
-        if isinstance(segment, dict) and _resync_segment_words_to_text(segment, force=True):
+    for idx, segment in enumerate(corrected[0]):
+        if isinstance(segment, dict) and _resync_segment_words_to_text(segment, force=idx in force_indexes):
             resynced += 1
     return resynced
 
@@ -1062,7 +1208,10 @@ async def native_complete_review(request: Request, instrumental_selection: str |
         if canonical_lines:
             tail_indexes = tail_junk_segment_indexes(aligned, corrected_segments, canonical_lines)
         trim_debug = _delete_corrected_segment_indexes(payload, tail_indexes) if tail_indexes else {"tail_trimmed": 0}
-        words_resynced = _resync_all_segment_words(payload)
+        words_resynced = _resync_all_segment_words(
+            payload,
+            force_indexes=set(edit_debug.get("text_edited_indexes") or []),
+        )
 
         if not edit_debug["corrected_segments_found"]:
             return JSONResponse(

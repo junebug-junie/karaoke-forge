@@ -18,6 +18,7 @@ from packages.karaoke_forge.review_proxy import (
     _apply_segment_edits_to_corrected_segments,
     _delete_corrected_segment_indexes,
     _find_corrected_segments,
+    _resync_all_segment_words,
     _resync_segment_words_to_text,
 )
 from packages.karaoke_forge.runner import run_job
@@ -79,6 +80,45 @@ def test_segments_digest_and_preview():
     assert preview["last"] == ["three", "four"]
 
 
+def test_preserve_multiword_whisper_on_resync():
+    segment = {
+        "text": "hello world",
+        "start_time": 1.0,
+        "end_time": 3.0,
+        "words": [
+            {"id": "w0", "text": "hello", "start_time": 1.0, "end_time": 2.0},
+            {"id": "w1", "text": "world", "start_time": 2.0, "end_time": 3.0},
+        ],
+    }
+    changed = _resync_segment_words_to_text(segment, force=False)
+    assert changed is False
+    assert len(segment["words"]) == 2
+    assert segment["words"][0]["text"] == "hello"
+    assert segment["words"][1]["text"] == "world"
+
+
+def test_resync_all_segment_words_preserves_unchanged_multiword():
+    payload = {
+        "corrected_segments": [
+            {
+                "text": "hello world",
+                "start_time": 1.0,
+                "end_time": 3.0,
+                "words": [
+                    {"text": "hello", "start_time": 1.0, "end_time": 2.0},
+                    {"text": "world", "start_time": 2.0, "end_time": 3.0},
+                ],
+            },
+        ],
+    }
+    resynced = _resync_all_segment_words(payload, force_indexes=set())
+    assert resynced == 0
+    words = payload["corrected_segments"][0]["words"]
+    assert len(words) == 2
+    assert words[0]["text"] == "hello"
+    assert words[1]["text"] == "world"
+
+
 def test_text_edit_resyncs_words_for_final_render():
     segment = {
         "text": "old line",
@@ -95,9 +135,59 @@ def test_text_edit_resyncs_words_for_final_render():
         [{"index": 0, "text": "new line", "start": "1", "end": "2"}],
     )
     assert segment["text"] == "new line"
-    assert segment["words"][0]["text"] == "new line"
+    assert len(segment["words"]) == 2
+    assert segment["words"][0]["text"] == "new"
+    assert segment["words"][0]["start_time"] == 1.0
+    assert segment["words"][0]["end_time"] == 1.5
+    assert segment["words"][1]["text"] == "line"
+    assert segment["words"][1]["start_time"] == 1.5
+    assert segment["words"][1]["end_time"] == 2.0
+
+
+def test_text_edit_redistributes_word_timings_by_existing_durations():
+    segment = {
+        "text": "old line",
+        "start_time": 1.0,
+        "end_time": 3.0,
+        "words": [
+            {"text": "old", "start_time": 1.0, "end_time": 2.0},
+            {"text": "line", "start_time": 2.0, "end_time": 3.0},
+        ],
+    }
+    segment["text"] = "ab cd"
+    changed = _resync_segment_words_to_text(segment)
+    assert changed is True
+    assert len(segment["words"]) == 2
+    assert segment["words"][0]["text"] == "ab"
     assert segment["words"][0]["start_time"] == 1.0
     assert segment["words"][0]["end_time"] == 2.0
+    assert segment["words"][1]["text"] == "cd"
+    assert segment["words"][1]["start_time"] == 2.0
+    assert segment["words"][1]["end_time"] == 3.0
+
+
+def test_timing_edit_scales_multiword_proportionally():
+    segment = {
+        "text": "hello world",
+        "start_time": 1.0,
+        "end_time": 3.0,
+        "words": [
+            {"text": "hello", "start_time": 1.0, "end_time": 2.0},
+            {"text": "world", "start_time": 2.0, "end_time": 3.0},
+        ],
+    }
+    payload = {"corrected_segments": [segment]}
+    _apply_segment_edits_to_corrected_segments(
+        payload,
+        [{"index": 0, "text": "hello world", "start": "2", "end": "6"}],
+    )
+    assert segment["start_time"] == 2.0
+    assert segment["end_time"] == 6.0
+    assert len(segment["words"]) == 2
+    assert segment["words"][0]["start_time"] == 2.0
+    assert segment["words"][0]["end_time"] == 4.0
+    assert segment["words"][1]["start_time"] == 4.0
+    assert segment["words"][1]["end_time"] == 6.0
 
 
 def test_delete_tail_segment_indexes():
@@ -255,6 +345,36 @@ def test_native_complete_trims_tail_junk_with_lyrics(client, tmp_path, monkeypat
 
     assert response.status_code == 200
     assert response.json()["tail_trimmed"] == 1
+
+
+def test_native_complete_path_preserves_multiword_whisper():
+    whisper_words = [
+        {"id": "w0", "text": "hello", "start_time": 1.0, "end_time": 2.0},
+        {"id": "w1", "text": "world", "start_time": 2.0, "end_time": 3.0},
+    ]
+    payload = {
+        "corrected_segments": [
+            {
+                "text": "hello world",
+                "start_time": 1.0,
+                "end_time": 3.0,
+                "words": list(whisper_words),
+            },
+        ],
+    }
+    edit_debug = _apply_segment_edits_to_corrected_segments(payload, [])
+    words_resynced = _resync_all_segment_words(
+        payload,
+        force_indexes=set(edit_debug.get("text_edited_indexes") or []),
+    )
+    words = payload["corrected_segments"][0]["words"]
+    assert edit_debug["text_edit_count"] == 0
+    assert words_resynced == 0
+    assert len(words) == 2
+    assert words[0]["text"] == "hello"
+    assert words[1]["text"] == "world"
+    assert words[0]["start_time"] == 1.0
+    assert words[1]["end_time"] == 3.0
 
 
 def test_timing_edit_resyncs_words(client):
