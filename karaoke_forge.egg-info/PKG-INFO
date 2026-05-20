@@ -1,3 +1,21 @@
+Metadata-Version: 2.4
+Name: karaoke-forge
+Version: 0.1.0
+Summary: Private indie karaoke and mashup video factory.
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: fastapi>=0.115.0
+Requires-Dist: uvicorn[standard]>=0.30.0
+Requires-Dist: python-multipart>=0.0.9
+Requires-Dist: pydantic>=2.7.0
+Requires-Dist: httpx>=0.27.0
+Requires-Dist: python-dotenv>=1.0.1
+Provides-Extra: generator
+Requires-Dist: karaoke-gen[local-whisper]; extra == "generator"
+Requires-Dist: whisper-timestamped; extra == "generator"
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0.0; extra == "dev"
+
 # Karaoke Forge
 
 Private indie karaoke and mashup video factory.
