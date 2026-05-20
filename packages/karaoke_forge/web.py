@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import (
@@ -24,7 +24,7 @@ from .base_path import StripBasePathMiddleware
 from .job_lifecycle import find_blocking_active_job, reconcile_orphaned_jobs
 from .review_proxy import router as review_router
 from .runner import run_job
-from .store import Job, create_job, get_job, init_db, list_jobs
+from .store import TERMINAL_STATUSES, Job, create_job, get_job, init_db, list_jobs
 
 app = FastAPI(title="Karaoke Forge", version="0.1.0")
 app.include_router(review_router)
@@ -439,9 +439,10 @@ def job_detail(job_id: str, blocked: str | None = None) -> HTMLResponse:
     )
 
     raw_log_url = esc(public_url('/jobs/' + job.id + '/log/raw'))
-    live_log_url = esc(public_url('/jobs/' + job.id + '/log/text'))
+    live_log_url = esc(public_url('/jobs/' + job.id + '/log/live'))
     tail_log_url = esc(public_url('/jobs/' + job.id + '/log/tail'))
     trace_log_url = esc(public_url('/jobs/' + job.id + '/log/trace'))
+    poll_log = job.status not in TERMINAL_STATUSES
     body = f"""
 <section class="panel">
   <h1>{esc(job.artist)} — {esc(job.title)}</h1>
@@ -483,15 +484,31 @@ def job_detail(job_id: str, blocked: str | None = None) -> HTMLResponse:
     const logUrl = "{live_log_url}";
     const tailUrl = "{tail_log_url}";
     const traceUrl = "{trace_log_url}";
+    const terminalStatuses = new Set({list(TERMINAL_STATUSES)!r});
+    let logPollTimer = null;
+
+    function syncStatusBadge(status) {{
+      const badge = document.querySelector("section.panel > p .status");
+      if (!badge || !status) return;
+      badge.textContent = status;
+      badge.className = "status " + status;
+    }}
 
     async function refreshLog() {{
       try {{
         const response = await fetch(logUrl, {{cache: "no-store"}});
-        const text = await response.text();
+        const payload = await response.json();
+        const text = payload.text ?? "";
+        const status = payload.status ?? "";
+        syncStatusBadge(status);
         const el = document.getElementById("live-log");
         const nearBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 80;
         el.textContent = text || "No log yet.";
         if (nearBottom) el.scrollTop = el.scrollHeight;
+        if (terminalStatuses.has(status) && logPollTimer !== null) {{
+          clearInterval(logPollTimer);
+          logPollTimer = null;
+        }}
       }} catch (err) {{
         document.getElementById("live-log").textContent = "Failed to load log: " + err;
       }}
@@ -514,7 +531,9 @@ def job_detail(job_id: str, blocked: str | None = None) -> HTMLResponse:
     document.getElementById("copy-trace-log").addEventListener("click", () => copyFromUrl("trace summary", traceUrl));
 
     refreshLog();
-    setInterval(refreshLog, 2000);
+    if ({str(poll_log).lower()}) {{
+      logPollTimer = setInterval(refreshLog, 2000);
+    }}
   </script>
 </section>
 """
@@ -535,6 +554,14 @@ def job_log_text(job_id: str) -> PlainTextResponse:
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return PlainTextResponse(read_job_log(job))
+
+
+@app.get("/jobs/{job_id}/log/live")
+def job_log_live(job_id: str) -> JSONResponse:
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return JSONResponse({"status": job.status, "text": read_job_log(job)})
 
 
 @app.get("/jobs/{job_id}/log/tail", response_class=PlainTextResponse)

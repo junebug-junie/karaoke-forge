@@ -830,15 +830,12 @@ HTML_TEMPLATE = """<!doctype html>
             const text = segmentText(seg);
             const originalText = originalTexts[idx] || segmentText(payload.original_segments?.[idx] || {});
             const resolvedLine = alignedCanonicalForRow(idx);
-            const hasCanonical = effectiveCanonicalLines().length > 0;
-            const displayText = hasCanonical && resolvedLine ? resolvedLine : text;
-            const preApplied = hasCanonical && resolvedLine && resolvedLine.trim() !== text.trim();
-            const mismatch = preApplied;
+            const mismatch = resolvedLine && resolvedLine.trim() !== text.trim();
             const isTailJunk = tailJunkIndexes.has(idx);
             const startSeconds = secondsValue(seg.start ?? seg.start_time ?? 0) ?? 0;
             const endSeconds = secondsValue(seg.end ?? seg.end_time ?? 0) ?? 0;
-            const rowClass = [mismatch ? "lyric-mismatch" : "", isTailJunk ? "tail-junk" : "", preApplied ? "lyrics-applied" : ""].filter(Boolean).join(" ");
-            return `<tr data-segment-index="${idx}" class="${rowClass}"><td class="row-index">${idx + 1}<br /><span class="muted">#${idx}</span></td><td>${renderTimeFields("start", startSeconds)}</td><td>${renderTimeFields("end", endSeconds)}</td><td class="duration-cell">${escapeHtml(formatDuration(startSeconds, endSeconds))}</td><td class="original-text">${escapeHtml(originalText || "—")}</td><td><textarea class="segment-edit" data-field="text" data-original-value="${escapeHtml(text)}" data-original-start="${startSeconds}" data-original-end="${endSeconds}" rows="2">${escapeHtml(displayText)}</textarea></td><td class="canonical-preview-cell">${canonicalPreviewHtml(idx, resolvedLine)}${isTailJunk ? `<span class="muted">outro junk</span>` : ""}</td><td><span class="dirty-badge">${preApplied ? "resolved" : "clean"}</span></td><td><button type="button" class="row-delete" data-delete-row="${idx}" title="Remove segment index ${idx}">Remove #${idx}</button></td></tr>`;
+            const rowClass = [mismatch ? "lyric-mismatch" : "", isTailJunk ? "tail-junk" : ""].filter(Boolean).join(" ");
+            return `<tr data-segment-index="${idx}" class="${rowClass}"><td class="row-index">${idx + 1}<br /><span class="muted">#${idx}</span></td><td>${renderTimeFields("start", startSeconds)}</td><td>${renderTimeFields("end", endSeconds)}</td><td class="duration-cell">${escapeHtml(formatDuration(startSeconds, endSeconds))}</td><td class="original-text">${escapeHtml(originalText || "—")}</td><td><textarea class="segment-edit" data-field="text" data-original-value="${escapeHtml(text)}" data-original-start="${startSeconds}" data-original-end="${endSeconds}" rows="2">${escapeHtml(text)}</textarea></td><td class="canonical-preview-cell">${canonicalPreviewHtml(idx, resolvedLine)}${isTailJunk ? `<span class="muted">outro junk</span>` : ""}</td><td><span class="dirty-badge">clean</span></td><td><button type="button" class="row-delete" data-delete-row="${idx}" title="Remove segment index ${idx}">Remove #${idx}</button></td></tr>`;
           }).join("")
         : `<tr><td colspan="9">No corrected_segments list found in correction payload. Use the contract debug drawer.</td></tr>`;
       const defaultSelection = document.getElementById("default-instrumental").textContent || "clean";

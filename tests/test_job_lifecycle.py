@@ -165,3 +165,27 @@ def test_submit_redirects_when_active_job_exists(client, tmp_path, monkeypatch):
 
     assert response.status_code == 303
     assert response.headers["location"].endswith(f"/jobs/{job.id}?blocked=active")
+
+
+def test_job_log_live_returns_status_and_text(client, tmp_path):
+    job = _make_job(tmp_path, stem="logged")
+    log_path = Path(job.log_path)
+    log_path.write_text("hello run\n[exit_code] 0\n", encoding="utf-8")
+    update_job(job.id, status="done")
+
+    response = client.get(f"/karaoke-forge/jobs/{job.id}/log/live")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "done"
+    assert "hello run" in payload["text"]
+
+
+def test_job_detail_skips_log_poll_for_terminal_jobs(client, tmp_path):
+    job = _make_job(tmp_path, stem="finished")
+    update_job(job.id, status="failed", error="nope")
+
+    response = client.get(f"/karaoke-forge/jobs/{job.id}")
+    assert response.status_code == 200
+    assert "if (true)" not in response.text
+    assert "if (false)" in response.text
+    assert "/log/live" in response.text
